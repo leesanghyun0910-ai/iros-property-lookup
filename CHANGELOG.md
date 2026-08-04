@@ -5,23 +5,6 @@
 
 ---
 
-## [Unreleased]
-
-### ⚠️ 배포본과 main이 갈라져 있음
-
-프로덕션에 배포된 버전은 `9c78713` 기준이며 **건축물대장(세움터) 기능이 포함되어 있다.**
-main에는 해당 기능이 없다. 이는 의도된 상태다.
-
-`main`을 그대로 배포하면 프로덕션에서 다음이 제거된다:
-
-- `POST /api/building-register/status`
-- `POST /api/building-register/download`
-- 건축물대장 조회 열 · 행별 PDF 버튼 · 일괄 PDF 버튼
-- D1(`BUILDING_REGISTER_DB`) / R2(`BUILDING_REGISTER_PDFS`) 바인딩
-- 건축물대장 임시 캐시 cleanup cron (`0 18 * * *`)
-
-기능을 유지한 채 배포하려면 `feature/building-register`를 머지한 뒤 배포한다.
-
 ### Removed
 
 - **건축물대장(세움터) 기능을 main에서 제외.** 코드는 `feature/building-register` 브랜치(`9c78713`)에 보존.
