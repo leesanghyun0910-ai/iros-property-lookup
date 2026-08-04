@@ -10,7 +10,7 @@
     "dev:worker": "wrangler dev --port 8787",
     "build": "tsc --noEmit && vite build",
     "preview": "wrangler dev",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "sh scripts/confirm-deploy.sh && npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,6 +1,4 @@
 import type {
-  BuildingRegisterDownloadRequest,
-  BuildingRegisterStatusRequest, BuildingRegisterStatusResponse,
   BuildingTradeRequest, BuildingTradeResponse,
   CollectRequest, CollectResponse,
   CommercialPriceRequest, CommercialPriceResponse,
@@ -71,38 +69,4 @@ export async function fetchEumPrintHtml(req: EumPrintRequest): Promise<string> {
     }
   }
   return text;
-}
-
-export async function fetchBuildingRegisterStatus(req: BuildingRegisterStatusRequest): Promise<BuildingRegisterStatusResponse> {
-  const res = await fetch('/api/building-register/status', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
-  });
-  return (await res.json()) as BuildingRegisterStatusResponse;
-}
-
-export async function downloadBuildingRegisterPdf(req: BuildingRegisterDownloadRequest): Promise<{ blob: Blob; filename: string }> {
-  const res = await fetch('/api/building-register/download', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
-  });
-  const blob = await res.blob();
-  if (!res.ok) {
-    const text = await blob.text();
-    try {
-      const data = JSON.parse(text) as { error?: string };
-      throw new Error(data.error ?? '건축물대장 PDF 생성 실패');
-    } catch (e: any) {
-      if (e instanceof SyntaxError) throw new Error(text || '건축물대장 PDF 생성 실패');
-      throw e;
-    }
-  }
-  const disposition = res.headers.get('content-disposition') || '';
-  const filename = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
-  return {
-    blob,
-    filename: filename ? decodeURIComponent(filename) : '건축물대장.pdf',
-  };
 }

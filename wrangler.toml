@@ -13,18 +13,23 @@ binding = "LDONG"
 id = "44ac6675379f452d976b9ea9c5ebe24a"
 preview_id = "92a68cc4a68e45a4abef51d80ae47274"
 
-# 건축물대장 PDF 캐시용: D1은 작업/상태 메타, R2는 PDF 원본/병합본 임시 저장.
-[[d1_databases]]
-binding = "BUILDING_REGISTER_DB"
-database_name = "iros-building-register"
-database_id = "055adde7-871a-4af7-86cc-0eaa330fa4df"
+# ─────────────────────────────────────────────────────────────
+# 건축물대장(세움터) 기능 보류 — main에서 제외됨. 코드는 feature/building-register 브랜치.
+# Cloudflare의 D1/R2 리소스와 EAIS_ID·EAIS_PASS 시크릿은 삭제하지 않고 남겨둠.
+# 기능을 되살릴 때 아래 블록의 주석만 해제하면 된다.
+#
+# [[d1_databases]]
+# binding = "BUILDING_REGISTER_DB"
+# database_name = "iros-building-register"
+# database_id = "055adde7-871a-4af7-86cc-0eaa330fa4df"
+#
+# [[r2_buckets]]
+# binding = "BUILDING_REGISTER_PDFS"
+# bucket_name = "iros-building-register-pdfs"
+#
+# cron "0 18 * * *" (건축물대장 임시 캐시 cleanup)도 함께 되살릴 것.
+# ─────────────────────────────────────────────────────────────
 
-[[r2_buckets]]
-binding = "BUILDING_REGISTER_PDFS"
-bucket_name = "iros-building-register-pdfs"
-
-# 정기 작업:
-# - 매일 19:00 UTC(다음 날 04:00 KST) → 법정동코드 재수집
-# - 매일 18:00 UTC → 건축물대장 PDF 임시 캐시 cleanup
+# 정기 작업: 매일 19:00 UTC(다음 날 04:00 KST) → 법정동코드 재수집
 [triggers]
-crons = ["0 19 * * *", "0 18 * * *"]
+crons = ["0 19 * * *"]

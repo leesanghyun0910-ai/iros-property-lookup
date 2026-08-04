@@ -7,15 +7,7 @@ import { fetchBuildingTrades } from './trade';
 import { fetchCommercialPrices } from './commercial-price';
 import { fetchRealtyPrices } from './realty-price';
 import { buildEumPrintHtml } from './eum/print';
-import {
-  cleanupBuildingRegisterArtifacts,
-  downloadBuildingRegisterPdf,
-  fetchBuildingRegisterStatuses,
-} from './eais/building-register';
 import type {
-  BuildingRegisterDownloadRequest,
-  BuildingRegisterRequestItem,
-  BuildingRegisterStatusRequest,
   BuildingTradeRequest,
   CollectRequest,
   CommercialPriceRequest,
@@ -29,10 +21,6 @@ export interface Env {
   LDONG: KVNamespace;
   ODCLOUD_API_KEY: string;
   VWORLD_API_KEY: string;
-  EAIS_ID?: string;
-  EAIS_PASS?: string;
-  BUILDING_REGISTER_DB?: D1Database;
-  BUILDING_REGISTER_PDFS?: R2Bucket;
   ADMIN_TOKEN?: string; // 수동 갱신 엔드포인트 보호 (선택)
 }
 
@@ -101,22 +89,6 @@ function normalizeRealtyPriceItems(value: unknown): RealtyPriceRequest['items'] 
   return value
     .map((item: any) => ({
       key: String(item?.key ?? '').trim(),
-      address: String(item?.address ?? '').trim(),
-      roadAddr: item?.roadAddr == null ? undefined : String(item.roadAddr).trim(),
-      building: item?.building == null ? undefined : String(item.building).trim(),
-      floor: item?.floor == null ? undefined : String(item.floor).trim(),
-      room: item?.room == null ? undefined : String(item.room).trim(),
-      type: item?.type == null ? undefined : String(item.type).trim(),
-    }))
-    .filter((item) => item.key && item.address);
-}
-
-function normalizeBuildingRegisterItems(value: unknown): BuildingRegisterRequestItem[] | null {
-  if (!Array.isArray(value)) return null;
-  return value
-    .map((item: any) => ({
-      key: String(item?.key ?? '').trim(),
-      pinFmt: item?.pinFmt == null ? undefined : String(item.pinFmt).trim(),
       address: String(item?.address ?? '').trim(),
       roadAddr: item?.roadAddr == null ? undefined : String(item.roadAddr).trim(),
       building: item?.building == null ? undefined : String(item.building).trim(),
@@ -304,62 +276,14 @@ export default {
       }
     }
 
-    // 건물/집합건물 → 세움터 건축물대장 존재 여부 조회 (신청 생성 없음)
-    if (url.pathname === '/api/building-register/status' && request.method === 'POST') {
-      let body: BuildingRegisterStatusRequest;
-      try {
-        body = (await request.json()) as BuildingRegisterStatusRequest;
-      } catch {
-        return json({ ok: false, error: '잘못된 요청 본문' }, 400);
-      }
-      const items = normalizeBuildingRegisterItems(body?.items);
-      if (!items) {
-        return json({ ok: false, error: 'items 배열 필수' }, 400);
-      }
-      if (items.length > 1000) {
-        return json({ ok: false, error: '한 번에 최대 1000개 건물까지 조회할 수 있습니다.' }, 400);
-      }
-      try {
-        const results = await fetchBuildingRegisterStatuses(items, env, ctx);
-        return json({ ok: true, results });
-      } catch (e: any) {
-        return json({ ok: false, error: e?.message ?? '건축물대장 조회 실패' }, 502);
-      }
-    }
-
-    // 선택 건물/집합건물 → 다운로드 시점에 세움터 열람 신청 + PDF 생성 + R2/D1 캐시 + 병합
-    if (url.pathname === '/api/building-register/download' && request.method === 'POST') {
-      let body: BuildingRegisterDownloadRequest;
-      try {
-        body = (await request.json()) as BuildingRegisterDownloadRequest;
-      } catch {
-        return json({ ok: false, error: '잘못된 요청 본문' }, 400);
-      }
-      const items = normalizeBuildingRegisterItems(body?.items);
-      if (!items?.length) {
-        return json({ ok: false, error: 'items 배열 필수' }, 400);
-      }
-      if (items.length > 50) {
-        return json({ ok: false, error: '한 번에 최대 50개 건물까지 PDF를 생성할 수 있습니다.' }, 400);
-      }
-      try {
-        return await downloadBuildingRegisterPdf({ items }, env, ctx);
-      } catch (e: any) {
-        return json({ ok: false, error: e?.message ?? '건축물대장 PDF 생성 실패' }, 502);
-      }
-    }
-
     // 그 외 → 정적 자산 (SPA)
     return env.ASSETS.fetch(request);
   },
 
-  // ① 정기 갱신 — 법정동은 매일 04:00 KST, 건축물대장 임시 파일은 매일 03:00 KST cleanup
+  // ① 정기 갱신 — 법정동코드는 매일 04:00 KST 재수집
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     if (event.cron === '0 19 * * *') {
       ctx.waitUntil(refreshLdong(env).catch((e) => console.error('cron refresh 실패:', e?.message)));
-    }
-    if (event.cron === '0 18 * * *') {
-      ctx.waitUntil(cleanupBuildingRegisterArtifacts(env).catch((e) => console.error('건축물대장 cleanup 실패:', e?.message)));
     }
   },
 };

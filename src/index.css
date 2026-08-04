@@ -66,8 +66,7 @@ h1 { font-size: 22px; margin: 0 0 4px; }
 .eum-cell,
 .trade-cell,
 .commercial-price-cell,
-.realty-price-cell,
-.building-register-cell {
+.realty-price-cell {
   width: var(--status-col-w, 86px); min-width: var(--status-col-w, 86px); max-width: 96px;
   text-align: center !important; vertical-align: middle !important; white-space: normal;
 }
