@@ -16,6 +16,10 @@ import {
   cleanupLandRegisterArtifacts,
   downloadLandRegisterPdf,
 } from './gov24/land-register';
+import {
+  cleanupPropertyRegisterArtifacts,
+  downloadPropertyRegisterPdf,
+} from './iros/register';
 import type {
   BuildingRegisterDownloadRequest,
   BuildingRegisterRequestItem,
@@ -27,6 +31,8 @@ import type {
   EumPrintRequest,
   LandRegisterDownloadRequest,
   LandRegisterRequestItem,
+  PropertyRegisterDownloadRequest,
+  PropertyRegisterRequestItem,
   RealtyPriceRequest,
 } from '../shared/types';
 
@@ -40,6 +46,11 @@ export interface Env {
   KOREACONNECT_API_KEY?: string;
   GOV24_ID?: string;
   GOV24_PW?: string;
+  IROS_ID?: string;
+  IROS_PW?: string;
+  MON_NO1?: string;
+  MON_NO2?: string;
+  MON_PW?: string;
   BUILDING_REGISTER_DB?: D1Database;
   BUILDING_REGISTER_PDFS?: R2Bucket;
   ADMIN_TOKEN?: string; // 수동 갱신 엔드포인트 보호 (선택)
@@ -145,6 +156,17 @@ function normalizeLandRegisterItems(value: unknown): LandRegisterRequestItem[] |
       pinFmt: item?.pinFmt == null ? undefined : String(item.pinFmt).trim(),
     }))
     .filter((item) => item.key && item.address);
+}
+
+function normalizePropertyRegisterItems(value: unknown): PropertyRegisterRequestItem[] | null {
+  if (!Array.isArray(value)) return null;
+  // 유료 요청은 잘못된 항목을 조용히 제외하면 일부만 과금될 수 있으므로 원소 수를 보존한다.
+  return value.map((item: any) => ({
+    key: String(item?.key ?? '').trim(),
+    uniqNo: String(item?.uniqNo ?? '').trim(),
+    address: item?.address == null ? undefined : String(item.address).trim(),
+    pinFmt: item?.pinFmt == null ? undefined : String(item.pinFmt).trim(),
+  }));
 }
 
 export default {
@@ -346,6 +368,32 @@ export default {
       }
     }
 
+    // 토지/건물/집합건물 → 인터넷등기소 유료 등기부등본 열람 + R2/D1 캐시 + 병합
+    if (url.pathname === '/api/property-register/download' && request.method === 'POST') {
+      let body: PropertyRegisterDownloadRequest;
+      try {
+        body = (await request.json()) as PropertyRegisterDownloadRequest;
+      } catch {
+        return json({ ok: false, error: '잘못된 요청 본문' }, 400);
+      }
+      const items = normalizePropertyRegisterItems(body?.items);
+      if (!items?.length) {
+        return json({ ok: false, error: 'items 배열 필수' }, 400);
+      }
+      if (items.length > 30) {
+        return json({ ok: false, error: '한 번에 최대 30건까지 등기부등본을 열람할 수 있습니다.' }, 400);
+      }
+      const invalid = items.find((item) => !item.key || !/^\d{14}$/.test(item.uniqNo));
+      if (invalid) {
+        return json({ ok: false, error: '각 항목에는 key와 14자리 uniqNo가 필요합니다.' }, 400);
+      }
+      try {
+        return await downloadPropertyRegisterPdf({ items }, env);
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message ?? '등기부등본 PDF 열람 실패' }, 502);
+      }
+    }
+
     // 건물/집합건물 → 세움터 건축물대장 존재 여부 조회 (신청 생성 없음)
     if (url.pathname === '/api/building-register/status' && request.method === 'POST') {
       let body: BuildingRegisterStatusRequest;
@@ -404,6 +452,7 @@ export default {
       ctx.waitUntil(Promise.all([
         cleanupBuildingRegisterArtifacts(env),
         cleanupLandRegisterArtifacts(env),
+        cleanupPropertyRegisterArtifacts(env),
       ]).catch((e) => console.error('대장 cleanup 실패:', e?.message)));
     }
   },

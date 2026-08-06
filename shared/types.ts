@@ -256,6 +256,18 @@ export interface LandRegisterErrorResponse {
   error: string;
 }
 
+// ── 인터넷등기소 부동산등기부등본 열람 ─────────────────────────
+export interface PropertyRegisterRequestItem {
+  key: string;
+  uniqNo: string;     // 14자리 부동산고유번호
+  address?: string;
+  pinFmt?: string;
+}
+
+export interface PropertyRegisterDownloadRequest {
+  items: PropertyRegisterRequestItem[];
+}
+
 // ── 세움터 건축물대장 ──────────────────────────────────────────
 export type BuildingRegisterDocumentType = 'general' | 'multiFamily' | 'exclusive';
 export type BuildingRegisterAvailabilityStatus = 'available' | 'none' | 'error';
