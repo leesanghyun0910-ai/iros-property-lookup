@@ -13,6 +13,7 @@ const DOWNLOAD_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_ITEMS_PER_DOWNLOAD = 50;
 const ISSUE_CONCURRENCY = 2;
 const PROCESSING_STALE_MS = 10 * 60 * 1000;
+const EXTERNAL_REQUEST_TIMEOUT_MS = 30_000;
 
 // 소유권 변동 연혁은 포함하되 주민등록번호 뒷자리는 숨기고, 일반대장과 최근 7년 공시지가를 발급한다.
 const LAND_REGISTER_OPTIONS = {
@@ -76,8 +77,8 @@ interface ReadyDocument {
 }
 
 function buildRequestBody(parameters: KoreaConnectRequestParameters) {
-  // 실측: body 래핑 + pnuCd 누락은 VALID-999, 평면 요청은 B0003-999로 서로 다르게 처리된다.
-  return { body: parameters };
+  // 실측: flat + 실제 PNU는 성공했고, body로 감싸면 필드를 읽지 못해 VALID-999가 발생했다.
+  return parameters;
 }
 
 function requireConfiguration(env: LandRegisterEnv) {
@@ -134,11 +135,16 @@ function hexToPdfBytes(value: string) {
 
 async function responseJson(response: Response): Promise<KoreaConnectResponse> {
   const text = await response.text();
-  if (!text) return {};
+  if (!text) {
+    if (!response.ok) throw new Error(`[토지대장 발급 API] HTTP ${response.status}: 빈 응답`);
+    return {};
+  }
   try {
     return JSON.parse(text) as KoreaConnectResponse;
   } catch {
-    throw new Error(`KT API 게이트웨이 응답을 해석하지 못했습니다. (HTTP ${response.status})`);
+    const contentType = response.headers.get('content-type') || '';
+    const responseType = /text\/html/i.test(contentType) || /^\s*</.test(text) ? 'HTML' : 'JSON이 아닌';
+    throw new Error(`[토지대장 발급 API] HTTP ${response.status}: ${responseType} 응답`);
   }
 }
 
@@ -155,14 +161,24 @@ async function issueLandRegister(
     ...LAND_REGISTER_OPTIONS,
     requestType: '02',
   };
-  const response = await fetch(KOREACONNECT_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      api_user_key_id: credentials.apiKey,
-      'Content-Type': 'application/json; charset=UTF-8',
-    },
-    body: JSON.stringify(buildRequestBody(parameters)),
-  });
+  let response: Response;
+  try {
+    response = await fetch(KOREACONNECT_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        api_user_key_id: credentials.apiKey,
+        'Content-Type': 'application/json; charset=UTF-8',
+      },
+      body: JSON.stringify(buildRequestBody(parameters)),
+      // 잘못된 PNU는 약 15초 후 HTML 503을 반환할 수 있으며, 발급 요청은 자동 재시도하지 않는다.
+      signal: AbortSignal.timeout(EXTERNAL_REQUEST_TIMEOUT_MS),
+    });
+  } catch (error: any) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      throw new Error(`[토지대장 발급 API] ${EXTERNAL_REQUEST_TIMEOUT_MS / 1000}초 시간 초과`);
+    }
+    throw new Error(`[토지대장 발급 API] 연결 실패: ${error?.message ?? '알 수 없는 오류'}`);
+  }
   const payload = await responseJson(response);
 
   if (!response.ok) {
@@ -184,7 +200,7 @@ async function issueLandRegister(
 
   const hexString = String(payload.data?.hexString ?? '').trim();
   if (!hexString) throw new Error('정부24 토지대장 발급 응답에 PDF HEX가 없습니다.');
-  // 명세는 소문자 cappReqNo지만 형제 API의 대문자 표기도 방어적으로 수용한다.
+  // 실측 성공 응답은 소문자 cappReqNo다. 형제 API 호환을 위해 대문자 표기도 방어적으로 수용한다.
   const cappReqNo = String(payload.data?.cappReqNo ?? payload.data?.CappReqNo ?? '').trim();
   return { bytes: hexToPdfBytes(hexString), cappReqNo };
 }
