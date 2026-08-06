@@ -12,6 +12,10 @@ import {
   downloadBuildingRegisterPdf,
   fetchBuildingRegisterStatuses,
 } from './eais/building-register';
+import {
+  cleanupLandRegisterArtifacts,
+  downloadLandRegisterPdf,
+} from './gov24/land-register';
 import type {
   BuildingRegisterDownloadRequest,
   BuildingRegisterRequestItem,
@@ -21,6 +25,8 @@ import type {
   CommercialPriceRequest,
   EumPrintItem,
   EumPrintRequest,
+  LandRegisterDownloadRequest,
+  LandRegisterRequestItem,
   RealtyPriceRequest,
 } from '../shared/types';
 
@@ -31,6 +37,9 @@ export interface Env {
   VWORLD_API_KEY: string;
   EAIS_ID?: string;
   EAIS_PASS?: string;
+  KOREACONNECT_API_KEY?: string;
+  GOV24_ID?: string;
+  GOV24_PW?: string;
   BUILDING_REGISTER_DB?: D1Database;
   BUILDING_REGISTER_PDFS?: R2Bucket;
   ADMIN_TOKEN?: string; // 수동 갱신 엔드포인트 보호 (선택)
@@ -123,6 +132,17 @@ function normalizeBuildingRegisterItems(value: unknown): BuildingRegisterRequest
       floor: item?.floor == null ? undefined : String(item.floor).trim(),
       room: item?.room == null ? undefined : String(item.room).trim(),
       type: item?.type == null ? undefined : String(item.type).trim(),
+    }))
+    .filter((item) => item.key && item.address);
+}
+
+function normalizeLandRegisterItems(value: unknown): LandRegisterRequestItem[] | null {
+  if (!Array.isArray(value)) return null;
+  return value
+    .map((item: any) => ({
+      key: String(item?.key ?? '').trim(),
+      address: String(item?.address ?? '').trim(),
+      pinFmt: item?.pinFmt == null ? undefined : String(item.pinFmt).trim(),
     }))
     .filter((item) => item.key && item.address);
 }
@@ -304,6 +324,28 @@ export default {
       }
     }
 
+    // 선택 토지 → 정부24 토지대장 발급 + R2/D1 캐시 + 병합
+    if (url.pathname === '/api/land-register/download' && request.method === 'POST') {
+      let body: LandRegisterDownloadRequest;
+      try {
+        body = (await request.json()) as LandRegisterDownloadRequest;
+      } catch {
+        return json({ ok: false, error: '잘못된 요청 본문' }, 400);
+      }
+      const items = normalizeLandRegisterItems(body?.items);
+      if (!items?.length) {
+        return json({ ok: false, error: 'items 배열 필수' }, 400);
+      }
+      if (items.length > 50) {
+        return json({ ok: false, error: '한 번에 최대 50필지까지 토지대장을 발급할 수 있습니다.' }, 400);
+      }
+      try {
+        return await downloadLandRegisterPdf({ items }, env, ctx);
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message ?? '토지대장 PDF 발급 실패' }, 502);
+      }
+    }
+
     // 건물/집합건물 → 세움터 건축물대장 존재 여부 조회 (신청 생성 없음)
     if (url.pathname === '/api/building-register/status' && request.method === 'POST') {
       let body: BuildingRegisterStatusRequest;
@@ -353,13 +395,16 @@ export default {
     return env.ASSETS.fetch(request);
   },
 
-  // ① 정기 갱신 — 법정동은 매일 04:00 KST, 건축물대장 임시 파일은 매일 03:00 KST cleanup
+  // ① 정기 갱신 — 법정동은 매일 04:00 KST, 대장 임시 파일은 매일 03:00 KST cleanup
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     if (event.cron === '0 19 * * *') {
       ctx.waitUntil(refreshLdong(env).catch((e) => console.error('cron refresh 실패:', e?.message)));
     }
     if (event.cron === '0 18 * * *') {
-      ctx.waitUntil(cleanupBuildingRegisterArtifacts(env).catch((e) => console.error('건축물대장 cleanup 실패:', e?.message)));
+      ctx.waitUntil(Promise.all([
+        cleanupBuildingRegisterArtifacts(env),
+        cleanupLandRegisterArtifacts(env),
+      ]).catch((e) => console.error('대장 cleanup 실패:', e?.message)));
     }
   },
 };

@@ -240,6 +240,22 @@ export interface EumPrintRequest {
   items: EumPrintItem[];
 }
 
+// ── 정부24 토지대장 발급 ────────────────────────────────────────
+export interface LandRegisterRequestItem {
+  key: string;        // 매칭용 (부동산고유번호 pin)
+  address: string;    // PNU 변환용 지번 주소
+  pinFmt?: string;
+}
+
+export interface LandRegisterDownloadRequest {
+  items: LandRegisterRequestItem[];
+}
+
+export interface LandRegisterErrorResponse {
+  ok: false;
+  error: string;
+}
+
 // ── 세움터 건축물대장 ──────────────────────────────────────────
 export type BuildingRegisterDocumentType = 'general' | 'multiFamily' | 'exclusive';
 export type BuildingRegisterAvailabilityStatus = 'available' | 'none' | 'error';
