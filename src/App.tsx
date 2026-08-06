@@ -3,6 +3,7 @@ import {
   collect,
   downloadBuildingRegisterPdf,
   downloadLandRegisterPdf,
+  downloadPropertyRegisterPdf,
   fetchBuildingRegisterStatus,
   fetchBuildingTrades,
   fetchCommercialPrices,
@@ -29,6 +30,7 @@ import type {
   LandInfo,
   LandRegisterRequestItem,
   PropertyRecord,
+  PropertyRegisterRequestItem,
   RealtyPriceInfo,
   RealtyPriceRequestItem,
 } from '../shared/types';
@@ -360,6 +362,7 @@ export default function App() {
   const [bundlePdfPrintingKey, setBundlePdfPrintingKey] = useState<string | null>(null);
   const [buildingRegisterPdfKey, setBuildingRegisterPdfKey] = useState<string | null>(null);
   const [landRegisterPdfKey, setLandRegisterPdfKey] = useState<string | null>(null);
+  const [propertyRegisterPdfKey, setPropertyRegisterPdfKey] = useState<string | null>(null);
   const [eumPrintingKey, setEumPrintingKey] = useState<string | null>(null);
   const [buildingMenuOpen, setBuildingMenuOpen] = useState(false);
   const [allExpandedOverride, setAllExpandedOverride] = useState<boolean | null>(null);
@@ -608,6 +611,15 @@ export default function App() {
     };
   }
 
+  function toPropertyRegisterItem(rec: PropertyRecord): PropertyRegisterRequestItem {
+    return {
+      key: rec.pin,
+      uniqNo: rec.pin,
+      pinFmt: rec.pinFmt,
+      address: rec.address,
+    };
+  }
+
   async function loadBuildingRegisters(records: PropertyRecord[]) {
     const seen = new Set<string>();
     const items = records
@@ -694,7 +706,7 @@ export default function App() {
   }
 
   async function onLandBundlePdfOne(rec: PropertyRecord) {
-    if (eumPrintingKey || landRegisterPdfKey || running || landLoading) return;
+    if (eumPrintingKey || landRegisterPdfKey || propertyRegisterPdfKey || running || landLoading) return;
 
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
@@ -775,10 +787,20 @@ export default function App() {
   function renderDownloadCell(rec: PropertyRecord) {
     if (rec.type === '토지') {
       const registerBusy = landRegisterPdfKey === rec.pin;
+      const propertyRegisterBusy = propertyRegisterPdfKey === rec.pin;
       const pdfBusy = eumPrintingKey === rec.pin;
-      const busy = running || landLoading || Boolean(eumPrintingKey) || Boolean(landRegisterPdfKey);
+      const busy = running || landLoading || Boolean(eumPrintingKey) || Boolean(landRegisterPdfKey) || Boolean(propertyRegisterPdfKey);
       return (
         <div className="download-actions">
+          <button
+            type="button"
+            className="row-action download-button paid"
+            onClick={() => onPropertyRegisterPdfOne(rec)}
+            disabled={busy}
+            title="인터넷등기소 등기부등본 열람은 캐시가 없으면 건당 700원이 전자지갑에서 차감됩니다."
+          >
+            {propertyRegisterBusy ? '열람 중…' : '등기부 700원'}
+          </button>
           <button
             type="button"
             className="row-action download-button"
@@ -813,6 +835,7 @@ export default function App() {
     const hasRegister = buildingRegisterInfo[rec.pin]?.status === 'available';
     const hasBundleData = hasBuildingBundleData(rec, sources);
     const registerBusy = buildingRegisterPdfKey === rec.pin;
+    const propertyRegisterBusy = propertyRegisterPdfKey === rec.pin;
     const pdfBusy = bundlePdfPrintingKey === rec.pin;
     const excelBusy = bundleDownloadingKey === rec.pin;
     const busy = running ||
@@ -821,6 +844,7 @@ export default function App() {
       realtyPriceLoading ||
       buildingRegisterLoading ||
       Boolean(buildingRegisterPdfKey) ||
+      Boolean(propertyRegisterPdfKey) ||
       Boolean(bundleDownloadingKey) ||
       Boolean(bundlePdfPrintingKey);
     const registerTitle = hasRegister ? '세움터 건축물대장 PDF만 저장합니다.' : '건축물대장을 찾지 못했습니다.';
@@ -829,6 +853,15 @@ export default function App() {
 
     return (
       <div className="download-actions">
+        <button
+          type="button"
+          className="row-action download-button paid"
+          onClick={() => onPropertyRegisterPdfOne(rec)}
+          disabled={busy}
+          title="인터넷등기소 등기부등본 열람은 캐시가 없으면 건당 700원이 전자지갑에서 차감됩니다."
+        >
+          {propertyRegisterBusy ? '열람 중…' : '등기부 700원'}
+        </button>
         <button
           type="button"
           className="row-action download-button"
@@ -919,7 +952,7 @@ export default function App() {
   }
 
   async function onLandBundlePdfDownload() {
-    if (!selectedLandRecords.length || selectedLandRecords.length > 50 || landDownloading || eumPrintingKey || landRegisterPdfKey || running) return;
+    if (!selectedLandRecords.length || selectedLandRecords.length > 50 || landDownloading || eumPrintingKey || landRegisterPdfKey || propertyRegisterPdfKey || running) return;
 
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
@@ -948,7 +981,7 @@ export default function App() {
   }
 
   async function onLandRegisterPdfOne(rec: PropertyRecord) {
-    if (running || landLoading || eumPrintingKey || landRegisterPdfKey) return;
+    if (running || landLoading || eumPrintingKey || landRegisterPdfKey || propertyRegisterPdfKey) return;
 
     setLandRegisterPdfKey(rec.pin);
     try {
@@ -962,7 +995,7 @@ export default function App() {
   }
 
   async function onLandRegisterPdfDownload() {
-    if (!selectedLandRecords.length || selectedLandRecords.length > 50 || running || landLoading || eumPrintingKey || landRegisterPdfKey) return;
+    if (!selectedLandRecords.length || selectedLandRecords.length > 50 || running || landLoading || eumPrintingKey || landRegisterPdfKey || propertyRegisterPdfKey) return;
 
     setLandRegisterPdfKey('bulk');
     try {
@@ -974,6 +1007,36 @@ export default function App() {
       alert(e?.message ?? '토지대장 PDF 발급에 실패했습니다.');
     } finally {
       setLandRegisterPdfKey(null);
+    }
+  }
+
+  async function onPropertyRegisterPdfOne(rec: PropertyRecord) {
+    if (running || propertyRegisterPdfKey || landRegisterPdfKey || buildingRegisterPdfKey || eumPrintingKey || bundleDownloadingKey || bundlePdfPrintingKey) return;
+
+    setPropertyRegisterPdfKey(rec.pin);
+    try {
+      const { blob, filename } = await downloadPropertyRegisterPdf({ items: [toPropertyRegisterItem(rec)] });
+      triggerBlobDownload(blob, filename);
+    } catch (e: any) {
+      alert(e?.message ?? '등기부등본 PDF 열람에 실패했습니다.');
+    } finally {
+      setPropertyRegisterPdfKey(null);
+    }
+  }
+
+  async function onPropertyRegisterPdfDownload() {
+    if (!exportRecords.length || exportRecords.length > 30 || running || propertyRegisterPdfKey || landRegisterPdfKey || buildingRegisterPdfKey || eumPrintingKey || bundleDownloadingKey || bundlePdfPrintingKey) return;
+
+    setPropertyRegisterPdfKey('bulk');
+    try {
+      const { blob, filename } = await downloadPropertyRegisterPdf({
+        items: exportRecords.map(toPropertyRegisterItem),
+      });
+      triggerBlobDownload(blob, filename);
+    } catch (e: any) {
+      alert(e?.message ?? '등기부등본 PDF 열람에 실패했습니다.');
+    } finally {
+      setPropertyRegisterPdfKey(null);
     }
   }
 
@@ -998,7 +1061,7 @@ export default function App() {
   }
 
   async function onBuildingRegisterPdfOne(rec: PropertyRecord) {
-    if (running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey) return;
+    if (running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey || propertyRegisterPdfKey) return;
 
     setBuildingRegisterPdfKey(rec.pin);
     try {
@@ -1017,7 +1080,7 @@ export default function App() {
   }
 
   async function onBuildingBundleExcelOne(rec: PropertyRecord) {
-    if (running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey) return;
+    if (running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey || propertyRegisterPdfKey) return;
 
     setBundleDownloadingKey(rec.pin);
     try {
@@ -1030,7 +1093,7 @@ export default function App() {
   }
 
   async function onBuildingBundlePdfOne(rec: PropertyRecord) {
-    if (running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey) return;
+    if (running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey || propertyRegisterPdfKey) return;
 
     setBundlePdfPrintingKey(rec.pin);
     try {
@@ -1043,7 +1106,7 @@ export default function App() {
   }
 
   async function onBuildingBundleZipDownload() {
-    if (!selectedBuildingRecords.length || running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey) return;
+    if (!selectedBuildingRecords.length || running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey || propertyRegisterPdfKey) return;
 
     setBundleDownloadingKey('bulk');
     try {
@@ -1056,7 +1119,7 @@ export default function App() {
   }
 
   async function onBuildingBundlePdfDownload() {
-    if (!selectedBuildingRecords.length || running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey) return;
+    if (!selectedBuildingRecords.length || running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey || propertyRegisterPdfKey) return;
 
     setBundlePdfPrintingKey('bulk');
     try {
@@ -1069,7 +1132,7 @@ export default function App() {
   }
 
   async function onBuildingRegisterPdfDownload() {
-    if (!selectedBuildingRecords.length || running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey) return;
+    if (!selectedBuildingRecords.length || running || bundleDownloadingKey || bundlePdfPrintingKey || buildingRegisterPdfKey || propertyRegisterPdfKey) return;
 
     setBuildingRegisterPdfKey('bulk');
     try {
@@ -1176,9 +1239,21 @@ export default function App() {
                 : `고유번호 (${exportRecords.length}건)`}
           </button>
           <button
+            className="dl paid"
+            onClick={onPropertyRegisterPdfDownload}
+            disabled={!exportRecords.length || exportRecords.length > 30 || running || Boolean(propertyRegisterPdfKey) || Boolean(landRegisterPdfKey) || Boolean(buildingRegisterPdfKey) || Boolean(eumPrintingKey) || Boolean(bundleDownloadingKey) || Boolean(bundlePdfPrintingKey)}
+            title={exportRecords.length > 30
+              ? '유료 열람은 한 번에 최대 30건까지 가능합니다.'
+              : `캐시가 없는 등기부등본은 건당 700원이 차감됩니다. 선택 ${exportRecords.length}건의 최대 비용은 ${(exportRecords.length * 700).toLocaleString('ko-KR')}원입니다.`}
+          >
+            {propertyRegisterPdfKey === 'bulk'
+              ? '유료 열람 중…'
+              : `등기부등본 PDF (${exportRecords.length}건 · 건당 700원)`}
+          </button>
+          <button
             className="dl land"
             onClick={onLandBundlePdfDownload}
-            disabled={!selectedLandRecords.length || selectedLandRecords.length > 50 || running || landLoading || landDownloading || Boolean(eumPrintingKey) || Boolean(landRegisterPdfKey)}
+            disabled={!selectedLandRecords.length || selectedLandRecords.length > 50 || running || landLoading || landDownloading || Boolean(eumPrintingKey) || Boolean(landRegisterPdfKey) || Boolean(propertyRegisterPdfKey)}
             title={selectedLandRecords.length > 50 ? '한 번에 최대 50필지까지 인쇄할 수 있습니다.' : '선택한 토지를 토지이용계획서, 공시지가, 토지등급 순서로 병합합니다.'}
           >
             {landDownloading || eumPrintingKey === 'bulk' || landLoading ? '생성 중…' : `토지 다운로드 (${selectedLandRecords.length}건)`}
@@ -1186,7 +1261,7 @@ export default function App() {
           <button
             className="dl land"
             onClick={onLandRegisterPdfDownload}
-            disabled={!selectedLandRecords.length || selectedLandRecords.length > 50 || running || landLoading || landDownloading || Boolean(eumPrintingKey) || Boolean(landRegisterPdfKey)}
+            disabled={!selectedLandRecords.length || selectedLandRecords.length > 50 || running || landLoading || landDownloading || Boolean(eumPrintingKey) || Boolean(landRegisterPdfKey) || Boolean(propertyRegisterPdfKey)}
             title={selectedLandRecords.length > 50 ? '한 번에 최대 50필지까지 발급할 수 있습니다.' : '선택한 토지의 정부24 토지대장을 발급해 하나의 PDF로 병합합니다.'}
           >
             {landRegisterPdfKey === 'bulk' ? 'PDF 발급 중…' : `토지대장 PDF (${selectedLandRecords.length}건)`}
@@ -1208,7 +1283,7 @@ export default function App() {
                   setBuildingMenuOpen(false);
                   onBuildingBundleZipDownload();
                 }}
-                disabled={!selectedBuildingRecords.length || running || tradeLoading || commercialPriceLoading || realtyPriceLoading || buildingRegisterLoading || Boolean(bundleDownloadingKey) || Boolean(bundlePdfPrintingKey) || Boolean(buildingRegisterPdfKey)}
+                disabled={!selectedBuildingRecords.length || running || tradeLoading || commercialPriceLoading || realtyPriceLoading || buildingRegisterLoading || Boolean(bundleDownloadingKey) || Boolean(bundlePdfPrintingKey) || Boolean(buildingRegisterPdfKey) || Boolean(propertyRegisterPdfKey)}
               >
                 {bundleDownloadingKey === 'bulk' ? '생성 중…' : `EXCEL(ZIP) (${selectedBuildingRecords.length}건)`}
               </button>
@@ -1218,7 +1293,7 @@ export default function App() {
                   setBuildingMenuOpen(false);
                   onBuildingBundlePdfDownload();
                 }}
-                disabled={!selectedBuildingRecords.length || running || tradeLoading || commercialPriceLoading || realtyPriceLoading || buildingRegisterLoading || Boolean(bundleDownloadingKey) || Boolean(bundlePdfPrintingKey) || Boolean(buildingRegisterPdfKey)}
+                disabled={!selectedBuildingRecords.length || running || tradeLoading || commercialPriceLoading || realtyPriceLoading || buildingRegisterLoading || Boolean(bundleDownloadingKey) || Boolean(bundlePdfPrintingKey) || Boolean(buildingRegisterPdfKey) || Boolean(propertyRegisterPdfKey)}
               >
                 {bundlePdfPrintingKey === 'bulk' ? 'PDF 생성 중…' : `통합자료 PDF (${selectedBuildingRecords.length}건)`}
               </button>
@@ -1228,7 +1303,7 @@ export default function App() {
                   setBuildingMenuOpen(false);
                   onBuildingRegisterPdfDownload();
                 }}
-                disabled={!selectedBuildingRegisterRecords.length || running || buildingRegisterLoading || Boolean(bundleDownloadingKey) || Boolean(bundlePdfPrintingKey) || Boolean(buildingRegisterPdfKey)}
+                disabled={!selectedBuildingRegisterRecords.length || running || buildingRegisterLoading || Boolean(bundleDownloadingKey) || Boolean(bundlePdfPrintingKey) || Boolean(buildingRegisterPdfKey) || Boolean(propertyRegisterPdfKey)}
               >
                 {buildingRegisterPdfKey === 'bulk' ? 'PDF 생성 중…' : `건축물대장 PDF (${selectedBuildingRegisterRecords.length}건)`}
               </button>

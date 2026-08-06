@@ -7,6 +7,7 @@ import type {
   EumPrintRequest,
   LandInfoRequest, LandInfoResponse,
   LandRegisterDownloadRequest,
+  PropertyRegisterDownloadRequest,
   RealtyPriceRequest, RealtyPriceResponse,
 } from '../shared/types';
 
@@ -115,6 +116,10 @@ async function downloadPdf(
 
 export async function downloadLandRegisterPdf(req: LandRegisterDownloadRequest): Promise<{ blob: Blob; filename: string }> {
   return downloadPdf('/api/land-register/download', req, '토지대장.pdf', '토지대장 PDF 발급 실패');
+}
+
+export async function downloadPropertyRegisterPdf(req: PropertyRegisterDownloadRequest): Promise<{ blob: Blob; filename: string }> {
+  return downloadPdf('/api/property-register/download', req, '등기부등본.pdf', '등기부등본 PDF 열람 실패');
 }
 
 export async function downloadBuildingRegisterPdf(req: BuildingRegisterDownloadRequest): Promise<{ blob: Blob; filename: string }> {

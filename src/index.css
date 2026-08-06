@@ -35,6 +35,7 @@ h1 { font-size: 22px; margin: 0 0 4px; }
 .dl.land { background: #0f766e; }
 .dl.building { background: #2563eb; }
 .dl.building-pdf { background: #64748b; }
+.dl.paid { background: #b45309; }
 .dl:disabled { background: #cbd5e1; cursor: default; }
 .download-menu {
   position: relative; flex-shrink: 0;
@@ -77,6 +78,8 @@ h1 { font-size: 22px; margin: 0 0 4px; }
   cursor: pointer;
 }
 .row-action:hover:not(:disabled) { border-color: #6bc5b8; background: #ccfbf1; }
+.row-action.paid { border-color: #f2b66d; background: #fff7ed; color: #9a3412; }
+.row-action.paid:hover:not(:disabled) { border-color: #ea8a2f; background: #ffedd5; }
 .row-action:disabled { border-color: var(--line); background: #f8fafc; color: #a6adba; cursor: default; }
 .data-status {
   display: inline-flex; align-items: center; justify-content: center;
