@@ -144,7 +144,12 @@ async function responseJson(response: Response): Promise<KoreaConnectResponse> {
   } catch {
     const contentType = response.headers.get('content-type') || '';
     const responseType = /text\/html/i.test(contentType) || /^\s*</.test(text) ? 'HTML' : 'JSON이 아닌';
-    throw new Error(`[토지대장 발급 API] HTTP ${response.status}: ${responseType} 응답`);
+    // 본문 앞부분을 남긴다. 게이트웨이가 JSON 대신 차단/점검 페이지를 돌려줄 때
+    // 이게 없으면 원인을 전혀 좁힐 수 없다. 자격증명은 응답에 들어가지 않는다.
+    const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 300);
+    throw new Error(
+      `[토지대장 발급 API] HTTP ${response.status}: ${responseType} 응답 (content-type=${contentType || '없음'}) ${snippet}`,
+    );
   }
 }
 
