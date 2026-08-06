@@ -6,6 +6,7 @@ import type {
   CommercialPriceRequest, CommercialPriceResponse,
   EumPrintRequest,
   LandInfoRequest, LandInfoResponse,
+  LandRegisterDownloadRequest,
   RealtyPriceRequest, RealtyPriceResponse,
 } from '../shared/types';
 
@@ -82,8 +83,13 @@ export async function fetchBuildingRegisterStatus(req: BuildingRegisterStatusReq
   return (await res.json()) as BuildingRegisterStatusResponse;
 }
 
-export async function downloadBuildingRegisterPdf(req: BuildingRegisterDownloadRequest): Promise<{ blob: Blob; filename: string }> {
-  const res = await fetch('/api/building-register/download', {
+async function downloadPdf(
+  path: string,
+  req: unknown,
+  fallbackFilename: string,
+  fallbackError: string,
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
@@ -93,9 +99,9 @@ export async function downloadBuildingRegisterPdf(req: BuildingRegisterDownloadR
     const text = await blob.text();
     try {
       const data = JSON.parse(text) as { error?: string };
-      throw new Error(data.error ?? '건축물대장 PDF 생성 실패');
+      throw new Error(data.error ?? fallbackError);
     } catch (e: any) {
-      if (e instanceof SyntaxError) throw new Error(text || '건축물대장 PDF 생성 실패');
+      if (e instanceof SyntaxError) throw new Error(text || fallbackError);
       throw e;
     }
   }
@@ -103,6 +109,14 @@ export async function downloadBuildingRegisterPdf(req: BuildingRegisterDownloadR
   const filename = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
   return {
     blob,
-    filename: filename ? decodeURIComponent(filename) : '건축물대장.pdf',
+    filename: filename ? decodeURIComponent(filename) : fallbackFilename,
   };
+}
+
+export async function downloadLandRegisterPdf(req: LandRegisterDownloadRequest): Promise<{ blob: Blob; filename: string }> {
+  return downloadPdf('/api/land-register/download', req, '토지대장.pdf', '토지대장 PDF 발급 실패');
+}
+
+export async function downloadBuildingRegisterPdf(req: BuildingRegisterDownloadRequest): Promise<{ blob: Blob; filename: string }> {
+  return downloadPdf('/api/building-register/download', req, '건축물대장.pdf', '건축물대장 PDF 생성 실패');
 }

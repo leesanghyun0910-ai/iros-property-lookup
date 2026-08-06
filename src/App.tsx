@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   collect,
   downloadBuildingRegisterPdf,
+  downloadLandRegisterPdf,
   fetchBuildingRegisterStatus,
   fetchBuildingTrades,
   fetchCommercialPrices,
@@ -26,6 +27,7 @@ import type {
   CommercialPriceRequestItem,
   EumPrintItem,
   LandInfo,
+  LandRegisterRequestItem,
   PropertyRecord,
   RealtyPriceInfo,
   RealtyPriceRequestItem,
@@ -357,6 +359,7 @@ export default function App() {
   const [bundleDownloadingKey, setBundleDownloadingKey] = useState<string | null>(null);
   const [bundlePdfPrintingKey, setBundlePdfPrintingKey] = useState<string | null>(null);
   const [buildingRegisterPdfKey, setBuildingRegisterPdfKey] = useState<string | null>(null);
+  const [landRegisterPdfKey, setLandRegisterPdfKey] = useState<string | null>(null);
   const [eumPrintingKey, setEumPrintingKey] = useState<string | null>(null);
   const [buildingMenuOpen, setBuildingMenuOpen] = useState(false);
   const [allExpandedOverride, setAllExpandedOverride] = useState<boolean | null>(null);
@@ -597,6 +600,14 @@ export default function App() {
     };
   }
 
+  function toLandRegisterItem(rec: PropertyRecord): LandRegisterRequestItem {
+    return {
+      key: rec.pin,
+      pinFmt: rec.pinFmt,
+      address: rec.address,
+    };
+  }
+
   async function loadBuildingRegisters(records: PropertyRecord[]) {
     const seen = new Set<string>();
     const items = records
@@ -683,7 +694,7 @@ export default function App() {
   }
 
   async function onLandBundlePdfOne(rec: PropertyRecord) {
-    if (eumPrintingKey || running || landLoading) return;
+    if (eumPrintingKey || landRegisterPdfKey || running || landLoading) return;
 
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
@@ -763,14 +774,25 @@ export default function App() {
 
   function renderDownloadCell(rec: PropertyRecord) {
     if (rec.type === '토지') {
+      const registerBusy = landRegisterPdfKey === rec.pin;
       const pdfBusy = eumPrintingKey === rec.pin;
+      const busy = running || landLoading || Boolean(eumPrintingKey) || Boolean(landRegisterPdfKey);
       return (
         <div className="download-actions">
           <button
             type="button"
             className="row-action download-button"
+            onClick={() => onLandRegisterPdfOne(rec)}
+            disabled={busy}
+            title="정부24에서 이 필지의 토지대장을 발급해 저장합니다."
+          >
+            {registerBusy ? '발급 중…' : '토지대장'}
+          </button>
+          <button
+            type="button"
+            className="row-action download-button"
             onClick={() => onLandBundlePdfOne(rec)}
-            disabled={running || Boolean(eumPrintingKey) || landLoading}
+            disabled={busy}
             title="이 필지의 공시지가, 토지등급, 토지이용계획을 하나의 PDF로 저장합니다."
           >
             {pdfBusy ? '생성 중…' : 'PDF'}
@@ -897,7 +919,7 @@ export default function App() {
   }
 
   async function onLandBundlePdfDownload() {
-    if (!selectedLandRecords.length || selectedLandRecords.length > 50 || landDownloading || eumPrintingKey || running) return;
+    if (!selectedLandRecords.length || selectedLandRecords.length > 50 || landDownloading || eumPrintingKey || landRegisterPdfKey || running) return;
 
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
@@ -922,6 +944,36 @@ export default function App() {
     } finally {
       setLandDownloading(false);
       setEumPrintingKey(null);
+    }
+  }
+
+  async function onLandRegisterPdfOne(rec: PropertyRecord) {
+    if (running || landLoading || eumPrintingKey || landRegisterPdfKey) return;
+
+    setLandRegisterPdfKey(rec.pin);
+    try {
+      const { blob, filename } = await downloadLandRegisterPdf({ items: [toLandRegisterItem(rec)] });
+      triggerBlobDownload(blob, filename);
+    } catch (e: any) {
+      alert(e?.message ?? '토지대장 PDF 발급에 실패했습니다.');
+    } finally {
+      setLandRegisterPdfKey(null);
+    }
+  }
+
+  async function onLandRegisterPdfDownload() {
+    if (!selectedLandRecords.length || selectedLandRecords.length > 50 || running || landLoading || eumPrintingKey || landRegisterPdfKey) return;
+
+    setLandRegisterPdfKey('bulk');
+    try {
+      const { blob, filename } = await downloadLandRegisterPdf({
+        items: selectedLandRecords.map(toLandRegisterItem),
+      });
+      triggerBlobDownload(blob, filename);
+    } catch (e: any) {
+      alert(e?.message ?? '토지대장 PDF 발급에 실패했습니다.');
+    } finally {
+      setLandRegisterPdfKey(null);
     }
   }
 
@@ -1126,10 +1178,18 @@ export default function App() {
           <button
             className="dl land"
             onClick={onLandBundlePdfDownload}
-            disabled={!selectedLandRecords.length || selectedLandRecords.length > 50 || running || landLoading || landDownloading || Boolean(eumPrintingKey)}
+            disabled={!selectedLandRecords.length || selectedLandRecords.length > 50 || running || landLoading || landDownloading || Boolean(eumPrintingKey) || Boolean(landRegisterPdfKey)}
             title={selectedLandRecords.length > 50 ? '한 번에 최대 50필지까지 인쇄할 수 있습니다.' : '선택한 토지를 토지이용계획서, 공시지가, 토지등급 순서로 병합합니다.'}
           >
             {landDownloading || eumPrintingKey === 'bulk' || landLoading ? '생성 중…' : `토지 다운로드 (${selectedLandRecords.length}건)`}
+          </button>
+          <button
+            className="dl land"
+            onClick={onLandRegisterPdfDownload}
+            disabled={!selectedLandRecords.length || selectedLandRecords.length > 50 || running || landLoading || landDownloading || Boolean(eumPrintingKey) || Boolean(landRegisterPdfKey)}
+            title={selectedLandRecords.length > 50 ? '한 번에 최대 50필지까지 발급할 수 있습니다.' : '선택한 토지의 정부24 토지대장을 발급해 하나의 PDF로 병합합니다.'}
+          >
+            {landRegisterPdfKey === 'bulk' ? 'PDF 발급 중…' : `토지대장 PDF (${selectedLandRecords.length}건)`}
           </button>
           <details className="download-menu" open={buildingMenuOpen} ref={buildingMenuRef}>
             <summary
