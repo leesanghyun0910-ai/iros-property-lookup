@@ -1268,14 +1268,14 @@ export default function App() {
       <header className="top">
         <div>
           <div className="title-row">
-            <h1>부동산고유번호 조회</h1>
+            <h1>4종세트 발급</h1>
             <a
               className="guide-link"
-              href="https://merciful-situation-70f.notion.site/4-39632a11691780318f21f3303af62f52"
+              href="https://vigorous-mind-a0b.notion.site/4-df4afc57e6148219a54681223b0227ee?source=copy_link"
               target="_blank"
               rel="noreferrer"
             >
-              4종세트 일괄다운로드 방법
+              4종세트 사용 및 발급시 유의사항
             </a>
           </div>
           <p className="sub">주소를 줄바꿈으로 여러 건 입력하세요. 시·도 없이 주소만 넣어도 됩니다.</p>
