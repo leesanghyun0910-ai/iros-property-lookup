@@ -429,11 +429,17 @@ export default {
       if (!items?.length) {
         return json({ ok: false, error: 'items 배열 필수' }, 400);
       }
-      if (items.length > 50) {
-        return json({ ok: false, error: '한 번에 최대 50개 건물까지 PDF를 생성할 수 있습니다.' }, 400);
+      if (items.length > 1000) {
+        return json({ ok: false, error: '한 번에 최대 1000개 건물을 배정할 수 있습니다.' }, 400);
+      }
+      const selectedKeys = Array.isArray(body?.selectedKeys)
+        ? Array.from(new Set(body.selectedKeys.map((key) => String(key ?? '').trim()).filter(Boolean)))
+        : undefined;
+      if (selectedKeys && selectedKeys.length > 50) {
+        return json({ ok: false, error: '한 번에 최대 50개 건축물대장까지 PDF를 생성할 수 있습니다.' }, 400);
       }
       try {
-        return await downloadBuildingRegisterPdf({ items }, env, ctx);
+        return await downloadBuildingRegisterPdf({ items, selectedKeys }, env, ctx);
       } catch (e: any) {
         return json({ ok: false, error: e?.message ?? '건축물대장 PDF 생성 실패' }, 502);
       }

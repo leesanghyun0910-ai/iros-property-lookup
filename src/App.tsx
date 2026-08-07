@@ -410,6 +410,19 @@ export default function App() {
     [exportRecords],
   );
 
+  const allBuildingRecords = useMemo(() => {
+    const seen = new Set<string>();
+    const records: PropertyRecord[] = [];
+    for (const row of rows) {
+      for (const rec of row.records) {
+        if (!isBuildingRecord(rec) || seen.has(rec.pin)) continue;
+        seen.add(rec.pin);
+        records.push(rec);
+      }
+    }
+    return records;
+  }, [rows]);
+
   const selectedBuildingRegisterRecords = useMemo(
     () => selectedBuildingRecords.filter((rec) => buildingRegisterInfo[rec.pin]?.status === 'available'),
     [selectedBuildingRecords, buildingRegisterInfo],
@@ -646,6 +659,7 @@ export default function App() {
           address: item.address,
           pnu: null,
           status: 'error',
+          matchConfirmed: false,
           error,
         } satisfies BuildingRegisterAvailability]));
       }
@@ -658,6 +672,7 @@ export default function App() {
         address: item.address,
         pnu: null,
         status: 'error',
+        matchConfirmed: false,
         error: message,
       } satisfies BuildingRegisterAvailability]));
       setBuildingRegisterInfo((prev) => ({ ...prev, ...next }));
@@ -771,7 +786,43 @@ export default function App() {
     const info = buildingRegisterInfo[rec.pin];
     if (buildingRegisterLoading && !info) return renderDataStatus(true, false);
     if (info?.status === 'error') return renderDataStatus(false, false, info.error);
-    return renderDataStatus(false, info?.status === 'available');
+
+    const generalCount = info?.generalRegisterCount ?? 0;
+    const hasMultipleGeneralRegisters = generalCount > 1;
+    const registerDescriptions = info?.generalRegisterRows?.map((row, index) => {
+      const area = row.totalArea ? `${row.totalArea}㎡` : '';
+      return [area, row.mainPurpose].filter(Boolean).join(' ') || `${index + 1}번 대장`;
+    }) ?? [];
+    const registerSummary = generalCount > 0
+      ? `이 지번의 건축물대장 ${generalCount}개${registerDescriptions.length ? ` — ${registerDescriptions.join(' / ')}` : ''}`
+      : '';
+
+    if (info?.status === 'available') {
+      const ambiguous = !info.matchConfirmed;
+      const ratio = hasMultipleGeneralRegisters && info.generalRegisterIndex
+        ? ` (${info.generalRegisterIndex}/${generalCount})`
+        : '';
+      const title = [
+        ambiguous ? '동일 지번에 건축물이 여러 동 있어 자동 확정되지 않았습니다. 발급물을 열어 확인하세요' : '',
+        registerSummary,
+      ].filter(Boolean).join('\n');
+      return (
+        <span
+          className={`data-status ${ambiguous ? 'ambiguous' : 'ok'}${ratio ? ' with-count' : ''}`}
+          title={title || undefined}
+        >
+          {ambiguous ? 'O?' : 'O'}{ratio}
+        </span>
+      );
+    }
+    if (info?.status === 'none' && generalCount > 0) {
+      return (
+        <span className="data-status empty" title={registerSummary}>
+          {hasMultipleGeneralRegisters ? `- (${generalCount})` : '-'}
+        </span>
+      );
+    }
+    return renderDataStatus(false, false);
   }
 
   function renderLandJigaCell(rec: PropertyRecord) {
@@ -1054,9 +1105,9 @@ export default function App() {
     };
   }
 
-  async function ensureBuildingRegisterData(records: PropertyRecord[]) {
-    const missing = records.filter((rec) => isBuildingRecord(rec) && !buildingRegisterInfo[rec.pin]);
-    const loaded = missing.length ? await loadBuildingRegisters(missing) : {};
+  async function ensureBuildingRegisterData() {
+    // PNU 배정은 선택에 따라 달라지면 안 되므로 캐시 유무와 무관하게 전체 건물 형제를 함께 보낸다.
+    const loaded = allBuildingRecords.length ? await loadBuildingRegisters(allBuildingRecords) : {};
     return { ...buildingRegisterInfo, ...loaded };
   }
 
@@ -1065,12 +1116,15 @@ export default function App() {
 
     setBuildingRegisterPdfKey(rec.pin);
     try {
-      const info = await ensureBuildingRegisterData([rec]);
+      const info = await ensureBuildingRegisterData();
       if (info[rec.pin]?.status !== 'available') {
         alert('이 건물의 건축물대장을 찾지 못했습니다.');
         return;
       }
-      const { blob, filename } = await downloadBuildingRegisterPdf({ items: [toBuildingRegisterItem(rec)] });
+      const { blob, filename } = await downloadBuildingRegisterPdf({
+        items: allBuildingRecords.map(toBuildingRegisterItem),
+        selectedKeys: [rec.pin],
+      });
       triggerBlobDownload(blob, filename);
     } catch (e: any) {
       alert(e?.message ?? '건축물대장 PDF 생성에 실패했습니다.');
@@ -1136,14 +1190,15 @@ export default function App() {
 
     setBuildingRegisterPdfKey('bulk');
     try {
-      const registerInfo = await ensureBuildingRegisterData(selectedBuildingRecords);
+      const registerInfo = await ensureBuildingRegisterData();
       const registerRecords = selectedBuildingRecords.filter((rec) => registerInfo[rec.pin]?.status === 'available');
       if (!registerRecords.length) {
         alert('선택된 건물의 건축물대장을 찾지 못했습니다.');
         return;
       }
       const { blob, filename } = await downloadBuildingRegisterPdf({
-        items: registerRecords.map(toBuildingRegisterItem),
+        items: allBuildingRecords.map(toBuildingRegisterItem),
+        selectedKeys: registerRecords.map((rec) => rec.pin),
       });
       triggerBlobDownload(blob, filename);
     } catch (e: any) {

@@ -18,6 +18,7 @@ const ACTION_ID = 'BCIAAA04L01';
 const DOCUMENT_TTL_MS = 24 * 60 * 60 * 1000;
 const DOWNLOAD_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_ITEMS_PER_DOWNLOAD = 50;
+const MAX_ITEMS_PER_ALLOCATION = 1000;
 const EAIS_GET_RETRY_DELAYS_MS = [1_500];
 const EAIS_GET_RETRY_STATUSES = new Set([502, 503, 504, 520, 522, 524]);
 const STATUS_LOOKUP_CONCURRENCY = 5;
@@ -63,6 +64,18 @@ interface ReadyDocument {
 interface AvailabilityLookupCache {
   mainRows: Map<string, Promise<Record<string, any>[]>>;
   exclusiveRows: Map<string, Promise<Record<string, any>[]>>;
+}
+
+interface CandidateSelection {
+  candidate: Record<string, any> | null;
+  matchConfirmed: boolean;
+}
+
+interface PnuGroupItem {
+  item: BuildingRegisterRequestItem;
+  index: number;
+  pnu: string;
+  parsed: ParsedPnu;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -245,6 +258,10 @@ function extractHoNo(item: BuildingRegisterRequestItem) {
   return normalizeNo(match?.[1] || '');
 }
 
+function hasAdditionalLotTag(address: string) {
+  return /외\s*\d+\s*필지/.test(address);
+}
+
 function makeDetailAddress(row: Record<string, any>) {
   const main = String(Number(row.mnnm || row.locMnnm || '0'));
   const sub = String(Number(row.slno || row.locSlno || '0'));
@@ -300,90 +317,238 @@ async function getExclusiveRows(
   return pending;
 }
 
-async function selectExclusiveCandidate(
+function stableGroupItems(items: PnuGroupItem[]) {
+  return [...items].sort((a, b) => a.item.key.localeCompare(b.item.key) || a.index - b.index);
+}
+
+function stableCandidateRows(rows: Record<string, any>[]) {
+  const seenSeqnos = new Set<string>();
+  return rows
+    .map((row, index) => ({ row, index, seqno: String(row.bldrgstSeqno ?? '').trim() }))
+    .filter(({ seqno }) => {
+      if (!seqno) return true;
+      if (seenSeqnos.has(seqno)) return false;
+      seenSeqnos.add(seqno);
+      return true;
+    })
+    .sort((a, b) => a.seqno.localeCompare(b.seqno) || a.index - b.index)
+    .map(({ row }) => row);
+}
+
+async function getExclusiveCandidates(
   client: EaisClient,
-  item: BuildingRegisterRequestItem,
   parsed: ParsedPnu,
   mainRows: Record<string, any>[],
   cache: AvailabilityLookupCache,
 ) {
-  const wantedDong = extractDongNo(item);
-  const wantedHo = extractHoNo(item);
-  const direct = mainRows.find((row) => {
-    if (String(row.regstrKindCd ?? '') !== '4') return false;
-    const rowDong = normalizeNo(row.dongNm || row.locDongNm || '');
-    const rowHo = normalizeNo(row.hoNm || row.locHoNm || '');
-    return (!wantedDong || !rowDong || rowDong === wantedDong) && (!wantedHo || !rowHo || rowHo === wantedHo);
-  });
-  if (direct) return direct;
-
-  const titleRows = mainRows.filter((row) => String(row.regstrKindCd ?? '') === '3');
-  const sortedTitleRows = [...titleRows].sort((a, b) => {
-    const aDong = normalizeNo(a.dongNm || '');
-    const bDong = normalizeNo(b.dongNm || '');
-    if (wantedDong && aDong === wantedDong && bDong !== wantedDong) return -1;
-    if (wantedDong && bDong === wantedDong && aDong !== wantedDong) return 1;
-    return 0;
-  });
-
-  for (const title of sortedTitleRows) {
+  const direct = mainRows.filter((row) => String(row.regstrKindCd ?? '') === '4');
+  const titleRows = stableCandidateRows(mainRows.filter((row) => String(row.regstrKindCd ?? '') === '3'));
+  const exclusiveRows: Record<string, any>[] = [...direct];
+  for (const title of titleRows) {
     const rows = await getExclusiveRows(client, parsed.sigunguCd, String(title.bldrgstSeqno || ''), cache);
-    const match = rows.find((row: Record<string, any>) => {
-      const rowDong = normalizeNo(row.dongNm || row.locDongNm || title.dongNm || '');
-      const rowHo = normalizeNo(row.hoNm || row.locHoNm || '');
-      return (!wantedDong || !rowDong || rowDong === wantedDong) && (!wantedHo || !rowHo || rowHo === wantedHo);
-    });
-    if (match) return { ...match, sigunguCd: match.sigunguCd || title.sigunguCd, bjdongCd: match.bjdongCd || title.bjdongCd, platGbCd: match.platGbCd || title.platGbCd, mnnm: match.mnnm || title.mnnm, slno: match.slno || title.slno };
+    exclusiveRows.push(...rows.map((row: Record<string, any>) => ({
+      ...row,
+      dongNm: row.dongNm || row.locDongNm || title.dongNm,
+      sigunguCd: row.sigunguCd || title.sigunguCd,
+      bjdongCd: row.bjdongCd || title.bjdongCd,
+      platGbCd: row.platGbCd || title.platGbCd,
+      mnnm: row.mnnm || title.mnnm,
+      slno: row.slno || title.slno,
+    })));
   }
-  return null;
+  return stableCandidateRows(exclusiveRows);
 }
 
-async function resolveOneAvailability(
-  item: BuildingRegisterRequestItem,
+function assignGeneralCandidates(items: PnuGroupItem[], rows: Record<string, any>[]) {
+  const assignments = new Map<number, CandidateSelection>();
+  const orderedItems = stableGroupItems(items);
+  const remainingRows = stableCandidateRows(rows);
+  const assignFirst = (
+    entry: PnuGroupItem,
+    predicate: (row: Record<string, any>) => boolean,
+    matchConfirmed: boolean,
+  ) => {
+    const rowIndex = remainingRows.findIndex(predicate);
+    if (rowIndex < 0) return false;
+    const [candidate] = remainingRows.splice(rowIndex, 1);
+    assignments.set(entry.index, { candidate, matchConfirmed });
+    return true;
+  };
+
+  // 대장 행과 직접 대조할 수 있는 축은 응답에 bldNm 등이 없어서 등기부 room과 dongNm뿐이다.
+  for (const entry of orderedItems) {
+    const wantedHo = extractHoNo(entry.item);
+    if (!wantedHo) continue;
+    assignFirst(entry, (row) => normalizeNo(row.dongNm || '') === wantedHo, true);
+  }
+
+  // 검색 응답에는 외 N필지 정보가 없고, 533에 배정되는 PDF 본문도 실제로는 533 외 1필지일 수 있다.
+  // 사용자가 이 한계를 알고 발급 후 확인하기로 했으므로, 꼬리표 없는 등기부에 빈 dongNm 행을 먼저 배정한다.
+  for (const entry of orderedItems) {
+    if (assignments.has(entry.index) || extractHoNo(entry.item) || hasAdditionalLotTag(entry.item.address)) continue;
+    assignFirst(entry, (row) => !normalizeNo(row.dongNm || ''), true);
+  }
+
+  // 직접 대조할 축이 없어도 배정 가능한 등기부가 남아 있으면 pin 순서로 1:1 배정하고 확인 대상으로 표시한다.
+  const remainingItems = orderedItems.filter((entry) => !assignments.has(entry.index));
+  for (const entry of remainingItems) {
+    const candidate = remainingRows.shift();
+    if (!candidate) break;
+    assignments.set(entry.index, { candidate, matchConfirmed: false });
+  }
+  return assignments;
+}
+
+function assignExclusiveCandidates(items: PnuGroupItem[], rows: Record<string, any>[]) {
+  const assignments = new Map<number, CandidateSelection>();
+  const orderedItems = stableGroupItems(items);
+  const remainingRows = stableCandidateRows(rows);
+
+  // 전유부 목록은 단지 전체 세대이므로 조회된 등기부의 동·호와 실제 일치하는 행만 배정하고 나머지는 정상적으로 남긴다.
+  for (const entry of orderedItems) {
+    const wantedDong = extractDongNo(entry.item);
+    const wantedHo = extractHoNo(entry.item);
+    if (!wantedDong && !wantedHo) continue;
+    const rowIndex = remainingRows.findIndex((row) => {
+      const rowDong = normalizeNo(row.dongNm || row.locDongNm || '');
+      const rowHo = normalizeNo(row.hoNm || row.locHoNm || '');
+      return (!wantedDong || rowDong === wantedDong) && (!wantedHo || rowHo === wantedHo);
+    });
+    if (rowIndex < 0) continue;
+    const [candidate] = remainingRows.splice(rowIndex, 1);
+    assignments.set(entry.index, { candidate, matchConfirmed: true });
+  }
+  return assignments;
+}
+
+function unavailableResult(entry: PnuGroupItem, status: 'none' | 'error', error?: string): InternalAvailability {
+  return {
+    key: entry.item.key,
+    address: entry.item.address,
+    pnu: entry.pnu,
+    status,
+    matchConfirmed: false,
+    item: entry.item,
+    ...(error ? { error } : {}),
+  };
+}
+
+function availableResult(entry: PnuGroupItem, selection: CandidateSelection): InternalAvailability {
+  const candidate = selection.candidate;
+  if (!candidate) return unavailableResult(entry, 'none');
+  const resolved = resolveEaisRegisterType(candidate);
+  if (!resolved) return unavailableResult(entry, 'none');
+  const documentType = toDocumentType(resolved);
+  return {
+    key: entry.item.key,
+    address: entry.item.address,
+    pnu: entry.pnu,
+    status: 'available',
+    matchConfirmed: selection.matchConfirmed,
+    documentType,
+    documentLabel: documentLabel(documentType),
+    eaisRegisterKindCd: String(candidate.regstrKindCd ?? ''),
+    eaisMjrfmlyYn: String(candidate.mjrfmlyYn ?? candidate.mjrfmlyIssueYn ?? 'N'),
+    eaisBldrgstSeqno: String(candidate.bldrgstSeqno ?? ''),
+    detailAddress: makeDetailAddress(candidate) || entry.item.address,
+    item: entry.item,
+    candidate,
+  };
+}
+
+async function resolvePnuGroup(
+  items: PnuGroupItem[],
+  client: EaisClient,
+  cache: AvailabilityLookupCache,
+) {
+  const { pnu, parsed } = items[0];
+  try {
+    const rows = await getMainRows(client, parsed, pnu, cache);
+    if (!rows.length) return items.map((entry) => unavailableResult(entry, 'none'));
+
+    // 건별 독립 선택은 같은 대장을 중복 배정하거나 일부 행을 누락시킨다. PNU 전체 형제를 한 번에 1:1 배정한다.
+    const exclusiveItems = items.filter((entry) => entry.item.type === '집합건물');
+    const generalItems = items.filter((entry) => entry.item.type !== '집합건물');
+    const generalRows = stableCandidateRows(rows.filter((row) => String(row.regstrKindCd ?? '') === '2'));
+    const generalRegisterRows = generalRows.map((row) => {
+      const totalArea = String(row.totArea ?? '').trim();
+      const mainPurpose = String(row.mainPrposNm ?? '').trim();
+      return {
+        eaisBldrgstSeqno: String(row.bldrgstSeqno ?? ''),
+        ...(totalArea ? { totalArea } : {}),
+        ...(mainPurpose ? { mainPurpose } : {}),
+      };
+    });
+    const assignments = assignGeneralCandidates(generalItems, generalRows);
+
+    if (exclusiveItems.length) {
+      const exclusiveRows = await getExclusiveCandidates(client, parsed, rows, cache);
+      for (const [index, selection] of assignExclusiveCandidates(exclusiveItems, exclusiveRows)) {
+        assignments.set(index, selection);
+      }
+    }
+
+    return items.map((entry) => {
+      const selection = assignments.get(entry.index);
+      const result = selection ? availableResult(entry, selection) : unavailableResult(entry, 'none');
+      if (entry.item.type !== '집합건물') {
+        result.generalRegisterCount = generalRows.length;
+        result.generalRegisterRows = generalRegisterRows;
+        const generalRegisterIndex = selection?.candidate ? generalRows.indexOf(selection.candidate) : -1;
+        if (generalRegisterIndex >= 0) result.generalRegisterIndex = generalRegisterIndex + 1;
+      }
+      return result;
+    });
+  } catch (e: any) {
+    return items.map((entry) => unavailableResult(entry, 'error', e?.message ?? '세움터 조회 실패'));
+  }
+}
+
+async function resolveAvailabilities(
+  items: BuildingRegisterRequestItem[],
   env: BuildingRegisterEnv,
   ctx: ExecutionContext | undefined,
   client: EaisClient,
   cache: AvailabilityLookupCache,
-): Promise<InternalAvailability> {
-  const pnu = await addressToPnu(item.address, env, ctx);
-  if (!pnu) return { key: item.key, address: item.address, pnu: null, status: 'error', item, error: 'PNU 변환 실패' };
-  const parsed = parsePnu(pnu);
-  if (!parsed) return { key: item.key, address: item.address, pnu, status: 'error', item, error: 'PNU 형식 오류' };
+) {
+  const results = new Array<InternalAvailability>(items.length);
+  const groups = new Map<string, PnuGroupItem[]>();
 
-  try {
-    const rows = await getMainRows(client, parsed, pnu, cache);
-    if (!rows.length) return { key: item.key, address: item.address, pnu, status: 'none', item };
-
-    let candidate: Record<string, any> | null = null;
-    if (item.type === '집합건물' || extractHoNo(item)) {
-      candidate = await selectExclusiveCandidate(client, item, parsed, rows, cache);
+  await Promise.all(items.map(async (item, index) => {
+    // 클라이언트도 토지를 거르지만, 직접 API 호출에서 토지가 1:1 배정 행을 소진하면 정당한 건물이 none이 된다.
+    // 상태 조회와 다운로드가 공유하는 서버 배정 진입부에서 토지를 반드시 제외한다.
+    if (item.type?.trim() === '토지') {
+      results[index] = { key: item.key, address: item.address, pnu: null, status: 'none', matchConfirmed: false, item };
+      return;
     }
-    if (!candidate) {
-      candidate = rows.find((row) => String(row.regstrKindCd ?? '') === '2') || null;
+    const pnu = await addressToPnu(item.address, env, ctx);
+    if (!pnu) {
+      results[index] = { key: item.key, address: item.address, pnu: null, status: 'error', matchConfirmed: false, item, error: 'PNU 변환 실패' };
+      return;
     }
-    if (!candidate) return { key: item.key, address: item.address, pnu, status: 'none', item };
+    const parsed = parsePnu(pnu);
+    if (!parsed) {
+      results[index] = { key: item.key, address: item.address, pnu, status: 'error', matchConfirmed: false, item, error: 'PNU 형식 오류' };
+      return;
+    }
+    const group = groups.get(pnu) || [];
+    group.push({ item, index, pnu, parsed });
+    groups.set(pnu, group);
+  }));
 
-    const resolved = resolveEaisRegisterType(candidate);
-    if (!resolved) return { key: item.key, address: item.address, pnu, status: 'none', item };
-    const documentType = toDocumentType(resolved);
-
-    return {
-      key: item.key,
-      address: item.address,
-      pnu,
-      status: 'available',
-      documentType,
-      documentLabel: documentLabel(documentType),
-      eaisRegisterKindCd: String(candidate.regstrKindCd ?? ''),
-      eaisMjrfmlyYn: String(candidate.mjrfmlyYn ?? candidate.mjrfmlyIssueYn ?? 'N'),
-      eaisBldrgstSeqno: String(candidate.bldrgstSeqno ?? ''),
-      detailAddress: makeDetailAddress(candidate) || item.address,
-      item,
-      candidate,
-    };
-  } catch (e: any) {
-    return { key: item.key, address: item.address, pnu, status: 'error', item, error: e?.message ?? '세움터 조회 실패' };
-  }
+  const groupedItems = Array.from(groups.values());
+  let next = 0;
+  const worker = async () => {
+    while (next < groupedItems.length) {
+      const group = groupedItems[next++];
+      const groupResults = await resolvePnuGroup(group, client, cache);
+      groupResults.forEach((result, index) => {
+        results[group[index].index] = result;
+      });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(STATUS_LOOKUP_CONCURRENCY, groupedItems.length) }, worker));
+  return results;
 }
 
 export async function fetchBuildingRegisterStatuses(
@@ -395,17 +560,7 @@ export async function fetchBuildingRegisterStatuses(
   const client = new EaisClient(env);
   await client.login();
   const cache = createAvailabilityLookupCache();
-  const results = new Array<BuildingRegisterAvailability>(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const index = next++;
-      const result = await resolveOneAvailability(items[index], env, ctx, client, cache);
-      results[index] = stripInternal(result);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(STATUS_LOOKUP_CONCURRENCY, items.length) }, worker));
-  return results;
+  return (await resolveAvailabilities(items, env, ctx, client, cache)).map(stripInternal);
 }
 
 function requireStorage(env: BuildingRegisterEnv) {
@@ -422,8 +577,13 @@ function isoAfter(ms: number) {
   return new Date(Date.now() + ms).toISOString();
 }
 
-function recordKey(item: BuildingRegisterRequestItem, documentType: BuildingRegisterDocumentType) {
-  return `v2:${item.key}:${documentType}`;
+function recordKey(
+  item: BuildingRegisterRequestItem,
+  documentType: BuildingRegisterDocumentType,
+  bldrgstSeqno: string,
+) {
+  // 후보가 바뀌었을 때 이전에 잘못 매칭된 PDF 캐시를 재사용하지 않는다.
+  return `v3:${item.key}:${documentType}:${bldrgstSeqno || 'unknown'}`;
 }
 
 function safeFilename(value: string, fallback: string) {
@@ -787,7 +947,7 @@ async function existingReadyDocument(db: D1Database, bucket: R2Bucket, key: stri
 
 async function markDocumentError(db: D1Database, result: InternalAvailability, error: string) {
   const documentType = result.documentType!;
-  const key = recordKey(result.item, documentType);
+  const key = recordKey(result.item, documentType, result.eaisBldrgstSeqno || '');
   const now = isoNow();
   await db.prepare(
     `INSERT INTO building_register_documents
@@ -816,7 +976,7 @@ async function markDocumentError(db: D1Database, result: InternalAvailability, e
 
 async function createReadyDocument(db: D1Database, bucket: R2Bucket, client: EaisClient, session: EaisSession, result: InternalAvailability): Promise<ReadyDocument> {
   const documentType = result.documentType!;
-  const key = recordKey(result.item, documentType);
+  const key = recordKey(result.item, documentType, result.eaisBldrgstSeqno || '');
   const existing = await existingReadyDocument(db, bucket, key, documentType);
   if (existing) return existing;
 
@@ -931,8 +1091,12 @@ export async function downloadBuildingRegisterPdf(
   env: BuildingRegisterEnv,
   ctx?: ExecutionContext,
 ) {
-  const items = request.items.filter((item) => item.key && item.address).slice(0, MAX_ITEMS_PER_DOWNLOAD);
+  const items = request.items.filter((item) => item.key && item.address).slice(0, MAX_ITEMS_PER_ALLOCATION);
   if (!items.length) throw new Error('items 배열 필수');
+  const selectedKeys = request.selectedKeys ? new Set(request.selectedKeys) : null;
+  if (selectedKeys && selectedKeys.size > MAX_ITEMS_PER_DOWNLOAD) {
+    throw new Error(`한 번에 최대 ${MAX_ITEMS_PER_DOWNLOAD}개 건축물대장까지 PDF를 생성할 수 있습니다.`);
+  }
 
   const { db, bucket } = requireStorage(env);
   const client = new EaisClient(env);
@@ -940,16 +1104,38 @@ export async function downloadBuildingRegisterPdf(
   await clearReservedApplications(client, session);
 
   try {
-    const availability: InternalAvailability[] = [];
     const cache = createAvailabilityLookupCache();
-    for (const item of items) {
-      availability.push(await resolveOneAvailability(item, env, ctx, client, cache));
-    }
-    const available = availability.filter((result) => result.status === 'available' && result.documentType && result.candidate);
+    const availability = await resolveAvailabilities(items, env, ctx, client, cache);
+    const available = availability.filter((result) => (
+      result.status === 'available'
+      && result.documentType
+      && result.candidate
+      && (!selectedKeys || selectedKeys.has(result.item.key))
+    ));
     if (!available.length) throw new Error('다운로드 가능한 건축물대장이 없습니다.');
+    if (available.length > MAX_ITEMS_PER_DOWNLOAD) {
+      throw new Error(`한 번에 최대 ${MAX_ITEMS_PER_DOWNLOAD}개 건축물대장까지 PDF를 생성할 수 있습니다.`);
+    }
+
+    const groupedBySeqno = new Map<string, InternalAvailability[]>();
+    available.forEach((result, index) => {
+      const seqno = result.eaisBldrgstSeqno?.trim();
+      const groupKey = seqno ? `seqno:${seqno}` : `item:${index}:${result.item.key}`;
+      const group = groupedBySeqno.get(groupKey) || [];
+      group.push(result);
+      groupedBySeqno.set(groupKey, group);
+    });
+    const uniqueAvailable = Array.from(groupedBySeqno.values()).map((group) => {
+      if (group.length > 1) {
+        console.info(
+          `[EAIS] 동일 건축물대장 중복 제외: bldrgstSeqno=${group[0].eaisBldrgstSeqno} items=${group.map((result) => `${result.item.key}(${result.item.address})`).join(', ')}`,
+        );
+      }
+      return group[0];
+    });
 
     const docs: ReadyDocument[] = [];
-    for (const result of available) {
+    for (const result of uniqueAvailable) {
       docs.push(await createReadyDocument(db, bucket, client, session, result));
     }
 
@@ -959,7 +1145,7 @@ export async function downloadBuildingRegisterPdf(
     ].join('\n'));
     const cached = await existingDownload(db, bucket, selectionHash);
     const filename = docs.length === 1
-      ? `${safeFilename(available[0].item.address, available[0].item.key)}_건축물대장.pdf`
+      ? `${safeFilename(uniqueAvailable[0].item.address, uniqueAvailable[0].item.key)}_건축물대장.pdf`
       : `건축물대장_${docs.length}건.pdf`;
     if (cached) {
       await db.prepare('UPDATE building_register_downloads SET downloaded_at = ?, updated_at = ? WHERE id = ?')

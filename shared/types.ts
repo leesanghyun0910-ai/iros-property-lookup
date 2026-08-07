@@ -283,17 +283,27 @@ export interface BuildingRegisterRequestItem {
   type?: string;      // 건물 / 집합건물
 }
 
+export interface BuildingRegisterRowSummary {
+  eaisBldrgstSeqno: string;
+  totalArea?: string;
+  mainPurpose?: string;
+}
+
 export interface BuildingRegisterAvailability {
   key: string;
   address: string;
   pnu: string | null;
   status: BuildingRegisterAvailabilityStatus;
+  matchConfirmed: boolean;
   documentType?: BuildingRegisterDocumentType;
   documentLabel?: string;
   eaisRegisterKindCd?: string;
   eaisMjrfmlyYn?: string;
   eaisBldrgstSeqno?: string;
   detailAddress?: string;
+  generalRegisterCount?: number;
+  generalRegisterIndex?: number;
+  generalRegisterRows?: BuildingRegisterRowSummary[];
   error?: string;
 }
 
@@ -308,5 +318,6 @@ export interface BuildingRegisterStatusResponse {
 }
 
 export interface BuildingRegisterDownloadRequest {
-  items: BuildingRegisterRequestItem[];
+  items: BuildingRegisterRequestItem[]; // 선택과 무관한 PNU별 전체 배정 대상
+  selectedKeys?: string[];              // 실제 PDF를 발급할 등기부 key (없으면 전체)
 }
