@@ -14,6 +14,7 @@ const MAX_ITEMS_PER_DOWNLOAD = 30;
 const ISSUE_CONCURRENCY = 2;
 const PROCESSING_STALE_MS = 10 * 60 * 1000;
 const EXTERNAL_REQUEST_TIMEOUT_MS = 30_000;
+const KOREACONNECT_RETRY_DELAYS_MS = [500, 1_000];
 
 // PDF만 받고 공동담보 목록은 제외한다. 매매목록 포함과 유효사항만 표시는 명세 기본값과 반대로 고정한다.
 const PROPERTY_REGISTER_OPTIONS = {
@@ -66,6 +67,11 @@ interface KoreaConnectResponse {
   };
   errorCode?: string;
   errorMessage?: string;
+}
+
+interface ParsedKoreaConnectResponse {
+  payload: KoreaConnectResponse | null;
+  parseError: Error | null;
 }
 
 interface ResolvedItem {
@@ -129,6 +135,8 @@ function itemLabel(resolved: ResolvedItem) {
   return resolved.item.address || resolved.item.pinFmt || resolved.uniqNo;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function safeFilename(value: string, fallback: string) {
   const safe = value.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
   return safe || fallback;
@@ -160,22 +168,34 @@ function hexToPdfBytes(value: string) {
   return bytes;
 }
 
-async function responseJson(response: Response): Promise<KoreaConnectResponse> {
+async function responseJson(response: Response): Promise<ParsedKoreaConnectResponse> {
   const text = await response.text();
   if (!text) {
-    if (!response.ok) throw new Error(`[등기부등본 열람 API] HTTP ${response.status}: 빈 응답`);
-    return {};
+    return {
+      payload: null,
+      parseError: new Error(`[등기부등본 열람 API] HTTP ${response.status}: 빈 응답`),
+    };
   }
   try {
-    return JSON.parse(text) as KoreaConnectResponse;
+    const payload = JSON.parse(text);
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      return { payload: payload as KoreaConnectResponse, parseError: null };
+    }
+    return {
+      payload: null,
+      parseError: new Error(`[등기부등본 열람 API] HTTP ${response.status}: JSON 객체가 아닌 응답`),
+    };
   } catch {
     const contentType = response.headers.get('content-type') || '';
     const responseType = /text\/html/i.test(contentType) || /^\s*</.test(text) ? 'HTML' : 'JSON이 아닌';
     // 게이트웨이 차단/점검 페이지를 식별할 수 있도록 자격증명이 없는 응답 앞부분만 남긴다.
     const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 300);
-    throw new Error(
-      `[등기부등본 열람 API] HTTP ${response.status}: ${responseType} 응답 (content-type=${contentType || '없음'}) ${snippet}`,
-    );
+    return {
+      payload: null,
+      parseError: new Error(
+        `[등기부등본 열람 API] HTTP ${response.status}: ${responseType} 응답 (content-type=${contentType || '없음'}) ${snippet}`,
+      ),
+    };
   }
 }
 
@@ -199,54 +219,84 @@ async function issuePropertyRegister(
     payPw: credentials.payPw,
     ...PROPERTY_REGISTER_OPTIONS,
   };
-  let response: Response;
-  try {
-    response = await fetch(KOREACONNECT_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        api_user_key_id: credentials.apiKey,
-        'Content-Type': 'application/json; charset=UTF-8',
-      },
-      body: JSON.stringify(buildRequestBody(parameters)),
-      // 열람은 건당 과금되므로 시간 초과나 실패를 자동 재시도하지 않는다.
-      signal: AbortSignal.timeout(EXTERNAL_REQUEST_TIMEOUT_MS),
-    });
-  } catch (error: any) {
-    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
-      throw new Error(`[등기부등본 열람 API] ${EXTERNAL_REQUEST_TIMEOUT_MS / 1000}초 시간 초과`);
+  const maxAttempts = KOREACONNECT_RETRY_DELAYS_MS.length + 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(KOREACONNECT_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          api_user_key_id: credentials.apiKey,
+          'Content-Type': 'application/json; charset=UTF-8',
+        },
+        body: JSON.stringify(buildRequestBody(parameters)),
+        // 시간 초과·연결 실패는 요청 접수 여부를 알 수 없으므로 자동 재시도하지 않는다.
+        signal: AbortSignal.timeout(EXTERNAL_REQUEST_TIMEOUT_MS),
+      });
+    } catch (error: any) {
+      if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+        throw new Error(`[등기부등본 열람 API] ${EXTERNAL_REQUEST_TIMEOUT_MS / 1000}초 시간 초과`);
+      }
+      throw new Error(`[등기부등본 열람 API] 연결 실패: ${error?.message ?? '알 수 없는 오류'}`);
     }
-    throw new Error(`[등기부등본 열람 API] 연결 실패: ${error?.message ?? '알 수 없는 오류'}`);
-  }
-  const payload = await responseJson(response);
+    const parsed = await responseJson(response);
+    const payload = parsed.payload;
+    const hyphenTrNo = String(payload?.common?.hyphenTrNo ?? '').trim();
 
-  if (!response.ok) {
-    const code = String(payload.errorCode ?? '').trim();
-    const message = String(payload.errorMessage ?? '').trim() || `HTTP ${response.status}`;
-    throw new Error(`[KT API 게이트웨이${code ? ` ${code}` : ''}] ${message}`);
-  }
-
-  const common = payload.common;
-  if (common?.errYn === 'Y') {
-    const code = errorCodeFromCommon(common);
-    if (code === 'B1001-080') {
-      throw new Error('인터넷등기소 전자지갑 잔액이 부족합니다. 충전 후 다시 시도해 주세요.');
+    // 등기부등본 열람은 건당 700원이지만 hyphenTrNo가 없는 응답만 재시도한다.
+    // 거래번호가 없다는 것은 하이픈이 요청을 접수하지 못했다는 직접 증거이고,
+    // 결제는 하이픈이 요청을 접수해 등기소로 넘긴 뒤에 일어나므로 중복 과금되지 않는다.
+    // 바뀔 수 있는 HTML 방화벽 문구는 안전성 판별에 사용하지 않는다.
+    if (!hyphenTrNo && attempt < maxAttempts) {
+      const delay = KOREACONNECT_RETRY_DELAYS_MS[attempt - 1] + Math.floor(Math.random() * 250);
+      const responseType = parsed.parseError ? 'JSON 아님' : 'JSON';
+      console.log(
+        `[등기부등본 열람 API] 재시도 ${attempt}/${KOREACONNECT_RETRY_DELAYS_MS.length}: hyphenTrNo 없음 (${responseType}, ${delay}ms 후)`,
+      );
+      await sleep(delay);
+      continue;
     }
-    const message = String(common.errMsg ?? '').trim() || '인터넷등기소 등기부등본 열람에 실패했습니다.';
-    throw new Error(`[인터넷등기소 등기부등본 열람${code ? ` ${code}` : ''}] ${message}`);
-  }
-  if (!common || common.errYn !== 'N') {
-    // 무엇을 받았는지 남긴다. 이게 없으면 errYn이 왜 Y도 N도 아닌지 좁힐 수 없다.
-    // common에는 거래번호와 오류문구만 들어오고 자격증명은 포함되지 않는다.
-    const seen = common ? JSON.stringify(common).slice(0, 300) : 'common 없음';
-    throw new Error(`인터넷등기소 등기부등본 열람 응답의 처리 상태를 확인하지 못했습니다. ${seen}`);
+
+    if (parsed.parseError) throw parsed.parseError;
+    if (!payload) throw new Error('[등기부등본 열람 API] 응답 내용을 확인하지 못했습니다.');
+
+    if (!response.ok) {
+      const code = String(payload.errorCode ?? '').trim();
+      const message = String(payload.errorMessage ?? '').trim() || `HTTP ${response.status}`;
+      throw new Error(`[KT API 게이트웨이${code ? ` ${code}` : ''}] ${message}`);
+    }
+
+    const common = payload.common;
+    if (common?.errYn === 'Y') {
+      const code = errorCodeFromCommon(common);
+      if (code === 'B1001-080') {
+        throw new Error('인터넷등기소 전자지갑 잔액이 부족합니다. 충전 후 다시 시도해 주세요.');
+      }
+      const message = String(common.errMsg ?? '').trim() || '인터넷등기소 등기부등본 열람에 실패했습니다.';
+      throw new Error(`[인터넷등기소 등기부등본 열람${code ? ` ${code}` : ''}] ${message}`);
+    }
+    if (!common || common.errYn !== 'N') {
+      if (hyphenTrNo) {
+        console.warn(`[등기부등본 열람 API] 처리 상태 불확실: ${JSON.stringify(common).slice(0, 300)}`);
+        throw new Error(
+          `처리 결과가 불확실합니다. 인터넷등기소 열람 내역을 확인한 뒤 다시 시도해 주세요. (거래번호 ${hyphenTrNo})`,
+        );
+      }
+      throw new Error('인터넷등기소 등기부등본 열람 응답의 처리 상태를 확인하지 못했습니다.');
+    }
+    if (!hyphenTrNo) {
+      throw new Error(`인터넷등기소 등기부등본 열람 API가 ${maxAttempts}회 모두 거래번호 없는 응답을 반환했습니다.`);
+    }
+
+    return {
+      pdfHexString: String(payload.data?.pdfHexString ?? '').trim(),
+      dealNo: String(payload.data?.dealNo ?? '').trim(),
+      dealDate: String(payload.data?.dealDate ?? '').trim(),
+      apprNo: String(payload.data?.apprNo ?? '').trim(),
+    };
   }
 
-  return {
-    pdfHexString: String(payload.data?.pdfHexString ?? '').trim(),
-    dealNo: String(payload.data?.dealNo ?? '').trim(),
-    dealDate: String(payload.data?.dealDate ?? '').trim(),
-    apprNo: String(payload.data?.apprNo ?? '').trim(),
-  };
+  throw new Error('[등기부등본 열람 API] 응답을 확인하지 못했습니다.');
 }
 
 async function existingReadyDocument(

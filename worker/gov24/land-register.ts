@@ -14,6 +14,7 @@ const MAX_ITEMS_PER_DOWNLOAD = 50;
 const ISSUE_CONCURRENCY = 2;
 const PROCESSING_STALE_MS = 10 * 60 * 1000;
 const EXTERNAL_REQUEST_TIMEOUT_MS = 30_000;
+const KOREACONNECT_RETRY_DELAYS_MS = [500, 1_000];
 
 // 소유권 변동 연혁은 포함하되 주민등록번호 뒷자리는 숨기고, 일반대장과 최근 7년 공시지가를 발급한다.
 const LAND_REGISTER_OPTIONS = {
@@ -63,6 +64,11 @@ interface KoreaConnectResponse {
   errorMessage?: string;
 }
 
+interface ParsedKoreaConnectResponse {
+  payload: KoreaConnectResponse | null;
+  parseError: Error | null;
+}
+
 interface ResolvedItem {
   item: LandRegisterRequestItem;
   pnu: string;
@@ -108,6 +114,8 @@ function safeFilename(value: string, fallback: string) {
   return safe || fallback;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function hexNibble(code: number) {
   if (code >= 48 && code <= 57) return code - 48;
   if (code >= 65 && code <= 70) return code - 55;
@@ -133,23 +141,35 @@ function hexToPdfBytes(value: string) {
   return bytes;
 }
 
-async function responseJson(response: Response): Promise<KoreaConnectResponse> {
+async function responseJson(response: Response): Promise<ParsedKoreaConnectResponse> {
   const text = await response.text();
   if (!text) {
-    if (!response.ok) throw new Error(`[토지대장 발급 API] HTTP ${response.status}: 빈 응답`);
-    return {};
+    return {
+      payload: null,
+      parseError: new Error(`[토지대장 발급 API] HTTP ${response.status}: 빈 응답`),
+    };
   }
   try {
-    return JSON.parse(text) as KoreaConnectResponse;
+    const payload = JSON.parse(text);
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      return { payload: payload as KoreaConnectResponse, parseError: null };
+    }
+    return {
+      payload: null,
+      parseError: new Error(`[토지대장 발급 API] HTTP ${response.status}: JSON 객체가 아닌 응답`),
+    };
   } catch {
     const contentType = response.headers.get('content-type') || '';
     const responseType = /text\/html/i.test(contentType) || /^\s*</.test(text) ? 'HTML' : 'JSON이 아닌';
     // 본문 앞부분을 남긴다. 게이트웨이가 JSON 대신 차단/점검 페이지를 돌려줄 때
     // 이게 없으면 원인을 전혀 좁힐 수 없다. 자격증명은 응답에 들어가지 않는다.
     const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 300);
-    throw new Error(
-      `[토지대장 발급 API] HTTP ${response.status}: ${responseType} 응답 (content-type=${contentType || '없음'}) ${snippet}`,
-    );
+    return {
+      payload: null,
+      parseError: new Error(
+        `[토지대장 발급 API] HTTP ${response.status}: ${responseType} 응답 (content-type=${contentType || '없음'}) ${snippet}`,
+      ),
+    };
   }
 }
 
@@ -166,48 +186,80 @@ async function issueLandRegister(
     ...LAND_REGISTER_OPTIONS,
     requestType: '02',
   };
-  let response: Response;
-  try {
-    response = await fetch(KOREACONNECT_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        api_user_key_id: credentials.apiKey,
-        'Content-Type': 'application/json; charset=UTF-8',
-      },
-      body: JSON.stringify(buildRequestBody(parameters)),
-      // 잘못된 PNU는 약 15초 후 HTML 503을 반환할 수 있으며, 발급 요청은 자동 재시도하지 않는다.
-      signal: AbortSignal.timeout(EXTERNAL_REQUEST_TIMEOUT_MS),
-    });
-  } catch (error: any) {
-    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
-      throw new Error(`[토지대장 발급 API] ${EXTERNAL_REQUEST_TIMEOUT_MS / 1000}초 시간 초과`);
+  const maxAttempts = KOREACONNECT_RETRY_DELAYS_MS.length + 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(KOREACONNECT_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          api_user_key_id: credentials.apiKey,
+          'Content-Type': 'application/json; charset=UTF-8',
+        },
+        body: JSON.stringify(buildRequestBody(parameters)),
+        // 시간 초과·연결 실패는 요청 접수 여부를 알 수 없으므로 자동 재시도하지 않는다.
+        signal: AbortSignal.timeout(EXTERNAL_REQUEST_TIMEOUT_MS),
+      });
+    } catch (error: any) {
+      if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+        throw new Error(`[토지대장 발급 API] ${EXTERNAL_REQUEST_TIMEOUT_MS / 1000}초 시간 초과`);
+      }
+      throw new Error(`[토지대장 발급 API] 연결 실패: ${error?.message ?? '알 수 없는 오류'}`);
     }
-    throw new Error(`[토지대장 발급 API] 연결 실패: ${error?.message ?? '알 수 없는 오류'}`);
-  }
-  const payload = await responseJson(response);
+    const parsed = await responseJson(response);
+    const payload = parsed.payload;
+    const hyphenTrNo = String(payload?.common?.hyphenTrNo ?? '').trim();
 
-  if (!response.ok) {
-    // 실측: 키가 없거나 유효하지 않으면 HTTP 401 + AGW-E40102가 내려온다.
-    const code = String(payload.errorCode ?? '').trim();
-    const message = String(payload.errorMessage ?? '').trim() || `HTTP ${response.status}`;
-    throw new Error(`[KT API 게이트웨이${code ? ` ${code}` : ''}] ${message}`);
+    // hyphenTrNo가 없으면 하이픈이 요청을 접수하지 못한 것이므로 민원 발급도 일어나지 않았다.
+    // 실제 응답에서 이 사실을 확인한 경우에만 재시도해 중복 민원이 생기지 않게 한다.
+    // 바뀔 수 있는 HTML 방화벽 문구는 안전성 판별에 사용하지 않는다.
+    if (!hyphenTrNo && attempt < maxAttempts) {
+      const delay = KOREACONNECT_RETRY_DELAYS_MS[attempt - 1] + Math.floor(Math.random() * 250);
+      const responseType = parsed.parseError ? 'JSON 아님' : 'JSON';
+      console.log(
+        `[토지대장 발급 API] 재시도 ${attempt}/${KOREACONNECT_RETRY_DELAYS_MS.length}: hyphenTrNo 없음 (${responseType}, ${delay}ms 후)`,
+      );
+      await sleep(delay);
+      continue;
+    }
+
+    if (parsed.parseError) throw parsed.parseError;
+    if (!payload) throw new Error('[토지대장 발급 API] 응답 내용을 확인하지 못했습니다.');
+
+    if (!response.ok) {
+      // 실측: 키가 없거나 유효하지 않으면 HTTP 401 + AGW-E40102가 내려온다.
+      const code = String(payload.errorCode ?? '').trim();
+      const message = String(payload.errorMessage ?? '').trim() || `HTTP ${response.status}`;
+      throw new Error(`[KT API 게이트웨이${code ? ` ${code}` : ''}] ${message}`);
+    }
+
+    const common = payload.common;
+    if (common?.errYn === 'Y') {
+      const code = String(common.errCd ?? '').trim();
+      const message = String(common.errMsg ?? '').trim() || '정부24 토지대장 발급에 실패했습니다.';
+      throw new Error(`[정부24 토지대장 발급${code ? ` ${code}` : ''}] ${message}`);
+    }
+    if (!common || common.errYn !== 'N') {
+      if (hyphenTrNo) {
+        console.warn(`[토지대장 발급 API] 처리 상태 불확실: ${JSON.stringify(common).slice(0, 300)}`);
+        throw new Error(
+          `처리 결과가 불확실합니다. 정부24 민원 신청 내역을 확인한 뒤 다시 시도해 주세요. (거래번호 ${hyphenTrNo})`,
+        );
+      }
+      throw new Error('정부24 토지대장 발급 응답의 처리 상태를 확인하지 못했습니다.');
+    }
+    if (!hyphenTrNo) {
+      throw new Error(`정부24 토지대장 발급 API가 ${maxAttempts}회 모두 거래번호 없는 응답을 반환했습니다.`);
+    }
+
+    const hexString = String(payload.data?.hexString ?? '').trim();
+    if (!hexString) throw new Error('정부24 토지대장 발급 응답에 PDF HEX가 없습니다.');
+    // 실측 성공 응답은 소문자 cappReqNo다. 형제 API 호환을 위해 대문자 표기도 방어적으로 수용한다.
+    const cappReqNo = String(payload.data?.cappReqNo ?? payload.data?.CappReqNo ?? '').trim();
+    return { bytes: hexToPdfBytes(hexString), cappReqNo };
   }
 
-  const common = payload.common;
-  if (common?.errYn === 'Y') {
-    const code = String(common.errCd ?? '').trim();
-    const message = String(common.errMsg ?? '').trim() || '정부24 토지대장 발급에 실패했습니다.';
-    throw new Error(`[정부24 토지대장 발급${code ? ` ${code}` : ''}] ${message}`);
-  }
-  if (!common || common.errYn !== 'N') {
-    throw new Error('정부24 토지대장 발급 응답의 처리 상태를 확인하지 못했습니다.');
-  }
-
-  const hexString = String(payload.data?.hexString ?? '').trim();
-  if (!hexString) throw new Error('정부24 토지대장 발급 응답에 PDF HEX가 없습니다.');
-  // 실측 성공 응답은 소문자 cappReqNo다. 형제 API 호환을 위해 대문자 표기도 방어적으로 수용한다.
-  const cappReqNo = String(payload.data?.cappReqNo ?? payload.data?.CappReqNo ?? '').trim();
-  return { bytes: hexToPdfBytes(hexString), cappReqNo };
+  throw new Error('[토지대장 발급 API] 응답을 확인하지 못했습니다.');
 }
 
 async function existingReadyDocument(
