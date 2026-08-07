@@ -99,8 +99,10 @@ function requireConfiguration(env: PropertyRegisterEnv) {
   if (!env.MON_NO1 || !env.MON_NO2 || !env.MON_PW) {
     throw new Error('MON_NO1/MON_NO2/MON_PW 설정이 필요합니다.');
   }
-  if (!/^\d{8}$/.test(env.MON_NO1) || !/^\d{4}$/.test(env.MON_NO2)) {
-    throw new Error('MON_NO1은 8자리, MON_NO2는 4자리 숫자여야 합니다.');
+  // 전자민원캐시 번호는 앞 8자리에 영문자가 섞일 수 있다(실계정으로 확인). 뒤 4자리는 숫자다.
+  // 길이 검증은 남긴다 — 자릿수가 틀린 채로 호출하면 건당 700원이 헛나간다.
+  if (!/^[0-9A-Za-z]{8}$/.test(env.MON_NO1) || !/^\d{4}$/.test(env.MON_NO2)) {
+    throw new Error('MON_NO1은 영문·숫자 8자리, MON_NO2는 숫자 4자리여야 합니다.');
   }
   if (!env.BUILDING_REGISTER_DB) throw new Error('BUILDING_REGISTER_DB D1 바인딩이 필요합니다.');
   if (!env.BUILDING_REGISTER_PDFS) throw new Error('BUILDING_REGISTER_PDFS R2 바인딩이 필요합니다.');
@@ -233,7 +235,10 @@ async function issuePropertyRegister(
     throw new Error(`[인터넷등기소 등기부등본 열람${code ? ` ${code}` : ''}] ${message}`);
   }
   if (!common || common.errYn !== 'N') {
-    throw new Error('인터넷등기소 등기부등본 열람 응답의 처리 상태를 확인하지 못했습니다.');
+    // 무엇을 받았는지 남긴다. 이게 없으면 errYn이 왜 Y도 N도 아닌지 좁힐 수 없다.
+    // common에는 거래번호와 오류문구만 들어오고 자격증명은 포함되지 않는다.
+    const seen = common ? JSON.stringify(common).slice(0, 300) : 'common 없음';
+    throw new Error(`인터넷등기소 등기부등본 열람 응답의 처리 상태를 확인하지 못했습니다. ${seen}`);
   }
 
   return {
