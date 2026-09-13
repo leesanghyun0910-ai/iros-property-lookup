@@ -797,12 +797,12 @@ async function createReadApplication(client: EaisClient, session: EaisSession, r
     }
 
     const basketResult = await client.postJson('/bci/BCIAAA02R05', { lastUpdusrId: session.userId });
-    const basket = (basketResult.findPbsvcResveDtls || []).map((row: Record<string, any>) => ({ ...row, ownrExprsYn: 'N' }));
+    const basket = (basketResult.findPbsvcResveDtls || []).map((row: Record<string, any>) => ({ ...row, ownrExprsYn: 'Y' }));
     if (!basket.length) throw new Error('세움터 장바구니가 비어 있습니다.');
 
     const submitResult = await client.postJson('/bci/BCIAZA02S01', {
       pbsvcResveDtls: basket,
-      ownrExprsYn: 'N',
+      ownrExprsYn: 'Y',
       bldrgstGbCd: '1',
       pbsvcRecpInfo: {
         pbsvcGbCd: '01',
